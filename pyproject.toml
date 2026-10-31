@@ -35,8 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# click2mcp brings the `mcp` SDK; publish click2mcp to PyPI before this extra
+# can install from there.
 mcp = [
-    "mcp>=2.0",
+    "click2mcp>=0.1.0",
 ]
 test = [
     "pytest>=8",
