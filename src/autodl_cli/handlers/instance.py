@@ -6,6 +6,10 @@ next to the ``list`` array. AutoDL clamps an out-of-range ``page_index`` back to
 the first page instead of returning an empty page, so the walk in
 :func:`list_instances` is bounded by the ``max_page`` reported by the server.
 
+One instance's configuration snapshot lives behind
+``GET /api/v1/instance/snapshot``, keyed by the instance UUID. It describes the
+base image, GPU allocation, and host machine, but not the live status.
+
 TODO: implement the remaining lifecycle handlers and return the structures
 defined in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
@@ -24,6 +28,9 @@ if TYPE_CHECKING:
 
 #: Path of the plain-instance list endpoint.
 INSTANCE_LIST_PATH = "/api/v1/instance"
+
+#: Path of the per-instance configuration snapshot endpoint.
+INSTANCE_DETAIL_PATH = "/api/v1/instance/snapshot"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
@@ -176,13 +183,26 @@ def list_instances(
 
 
 def get_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
-    """Return one instance's details.
+    """Return one instance's configuration snapshot.
+
+    The snapshot names the instance's base image, GPU allocation, and host
+    machine, and repeats the machine's stock prices. It carries no live status
+    or connection details, so pair it with :func:`list_instances` when those are
+    needed.
 
     :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
-    :returns: The instance mapping.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: The snapshot mapping.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
     """
-    ...
+    payload = client.request(
+        "GET",
+        INSTANCE_DETAIL_PATH,
+        params={"instance_uuid": instance_id},
+    )
+    return require_success(payload, action="instance detail")
 
 
 def get_instance_status(client: AutoDLClient, instance_id: str) -> dict[str, object]:

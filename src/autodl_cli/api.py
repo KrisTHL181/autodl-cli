@@ -2,8 +2,8 @@
 
 Code that consumes autodl-toolkit as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
-handler surface for password login, browser-token lookup, and account balance,
-and normalises internal exceptions into the
+handler surface for password login, browser-token lookup, account balance, and
+instance listing/details, and normalises internal exceptions into the
 :class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
@@ -19,7 +19,14 @@ from autodl_cli.handlers import instance as instance_handler
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["AutoDLClient", "get_balance", "get_current_user", "list_instances", "login"]
+__all__ = [
+    "AutoDLClient",
+    "get_balance",
+    "get_current_user",
+    "get_instance",
+    "list_instances",
+    "login",
+]
 
 
 def login(
@@ -104,6 +111,22 @@ def list_instances(
             unbind_sub_user=unbind_sub_user,
             query=query,
         )
+
+
+def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
+    """Return one instance's configuration snapshot.
+
+    The snapshot describes the base image, GPU allocation, host machine, and
+    prices. It does not include the live status or connection details.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: The snapshot mapping.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.get_instance(client, instance_uuid)
 
 
 def get_current_user(token: str) -> dict[str, object]:

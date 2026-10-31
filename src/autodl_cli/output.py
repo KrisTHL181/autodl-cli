@@ -656,6 +656,235 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
     console.print(table)
 
 
+def _format_detail_gpu(detail: dict[str, object], machine: dict[str, object]) -> str:
+    """Return the instance's GPU model, with its vendor when reported.
+
+    The user-defined alias wins, then the snapshot alias, then the machine's
+    GPU type.
+
+    :param detail: Snapshot mapping returned by the API handler.
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: ``"RTX 3090 (nvidia)"`` or ``"-"`` when no GPU is reported.
+    """
+    name = _first_text(detail, "user_define_gpu_name", "snapshot_gpu_alias_name")
+    if name == "-":
+        gpu_type = machine.get("gpu_type")
+        if isinstance(gpu_type, dict):
+            value = gpu_type.get("name")
+            if isinstance(value, str) and value:
+                name = value
+    if name == "-":
+        return "-"
+
+    chip_corp = detail.get("chip_corp")
+    if isinstance(chip_corp, str) and chip_corp:
+        return f"{name} ({chip_corp})"
+    return name
+
+
+def _format_detail_gpu_memory(machine: dict[str, object]) -> str:
+    """Return the per-GPU memory reported by the machine.
+
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: A byte count such as ``"24G"``, or ``"-"``.
+    """
+    gpu_type = machine.get("gpu_type")
+    if not isinstance(gpu_type, dict):
+        return "-"
+    return _format_gib(gpu_type.get("memory"))
+
+
+def _format_detail_price(detail: dict[str, object]) -> str:
+    """Format the hourly price and the undiscounted list price.
+
+    :param detail: Snapshot mapping returned by the API handler.
+    :returns: ``"¥1.480/h (list ¥1.560/h)"``, or ``"-"`` when no price is
+        reported.
+    """
+    price = detail.get("payg_price")
+    if isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+        return "-"
+
+    text = f"{_format_yuan(price)}/h"
+    origin = detail.get("origin_pay_price")
+    if isinstance(origin, int) and not isinstance(origin, bool) and origin > 0 and origin != price:
+        text = f"{text} (list {_format_yuan(origin)}/h)"
+    return text
+
+
+def _format_detail_framework(image: dict[str, object]) -> str:
+    """Join the image's framework name and version.
+
+    :param image: The snapshot's ``image`` mapping.
+    :returns: ``"PyTorch 2.12.1"``, or whichever part is present.
+    """
+    name = image.get("framework_name")
+    version = image.get("framework_version")
+    if isinstance(name, str) and name and isinstance(version, str) and version:
+        return f"{name} {version}"
+    if isinstance(name, str) and name:
+        return name
+    if isinstance(version, str) and version:
+        return version
+    return "-"
+
+
+def _format_detail_region(machine: dict[str, object]) -> str:
+    """Return the region name with its sign in parentheses.
+
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: ``"内蒙B区 (nm-B2)"``, or whichever part is present.
+    """
+    name = _format_value(machine.get("region_name"))
+    sign = machine.get("region_sign")
+    if name != "-" and isinstance(sign, str) and sign:
+        return f"{name} ({sign})"
+    return name
+
+
+def _format_detail_cpu_cores(machine: dict[str, object]) -> str:
+    """Format the machine's used and total CPU cores.
+
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: ``"14 used / 112 total"``, or ``"-"`` when the counts are missing.
+    """
+    total = machine.get("cpu_num")
+    used = machine.get("cpu_used")
+    if (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and total > 0
+        and isinstance(used, int)
+        and not isinstance(used, bool)
+    ):
+        return f"{used} used / {total} total"
+    return "-"
+
+
+def _format_detail_memory(machine: dict[str, object]) -> str:
+    """Format the machine's used and total memory.
+
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: ``"60G / 503G"``, or ``"-"`` when no total is reported.
+    """
+    total = machine.get("memory")
+    used = machine.get("mem_used")
+    if (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and total > 0
+        and isinstance(used, int)
+        and not isinstance(used, bool)
+    ):
+        return f"{_format_gib(used)} / {_format_gib(total)}"
+    return _format_gib(total)
+
+
+def _format_detail_machine_disk(machine: dict[str, object]) -> str:
+    """Format the host machine's disk size and type.
+
+    :param machine: The snapshot's ``machine_info_snapshot`` mapping.
+    :returns: ``"7.0T SSD"``, ``"50G"``, or ``"-"``.
+    """
+    size = _format_gib(machine.get("disk_size"))
+    if size == "-":
+        return size
+    disk_type = machine.get("disk_type")
+    if isinstance(disk_type, str) and disk_type:
+        return f"{size} {disk_type}"
+    return size
+
+
+def _format_yes_no(value: object) -> str:
+    """Format an optional boolean as ``yes`` or ``no``.
+
+    :param value: Field value from the API response.
+    :returns: ``"yes"``/``"no"`` for booleans, otherwise :func:`_format_value`.
+    """
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return _format_value(value)
+
+
+def render_instance_detail(detail: dict[str, object], *, instance_uuid: str | None = None) -> None:
+    """Render one instance's configuration snapshot as a Rich table.
+
+    Fields are grouped into Instance, Image, and Machine sections; a section is
+    omitted when every field in it is missing. Values are kept human-readable
+    (yuan prices, GiB sizes), so ``--json`` callers receive the untouched API
+    response instead.
+
+    :param detail: Snapshot mapping returned by
+        :func:`autodl_cli.handlers.instance.get_instance`.
+    :param instance_uuid: UUID the snapshot was requested for, when known.
+    """
+    image = detail.get("image")
+    if not isinstance(image, dict):
+        image = {}
+    machine = detail.get("machine_info_snapshot")
+    if not isinstance(machine, dict):
+        machine = {}
+
+    # Build every section first so empty ones are not printed as bare headers.
+    sections: list[tuple[str, list[tuple[str, str]]]] = [
+        ("Instance", []),
+        ("Image", []),
+        ("Machine", []),
+    ]
+    instance_rows, image_rows, machine_rows = (rows for _, rows in sections)
+
+    base_image = image.get("base_image_uuid")
+    if base_image == image.get("image_name"):
+        base_image = None
+
+    rows: tuple[tuple[list[tuple[str, str]], str, object], ...] = (
+        (instance_rows, "UUID", instance_uuid),
+        (instance_rows, "GPU", _format_detail_gpu(detail, machine)),
+        (instance_rows, "GPU memory", _format_detail_gpu_memory(machine)),
+        (instance_rows, "Price", _format_detail_price(detail)),
+        (instance_rows, "Architecture", detail.get("cpu_arch")),
+        (image_rows, "Image name", image.get("image_name")),
+        (image_rows, "Base image", base_image),
+        (image_rows, "Framework", _format_detail_framework(image)),
+        (image_rows, "Python", image.get("python_version")),
+        (image_rows, "CUDA", image.get("cuda_version")),
+        (image_rows, "Image type", image.get("image_type")),
+        (machine_rows, "Region", _format_detail_region(machine)),
+        (machine_rows, "Data center", machine.get("data_center")),
+        (machine_rows, "CPU", machine.get("cpu_name")),
+        (machine_rows, "CPU cores", _format_detail_cpu_cores(machine)),
+        (machine_rows, "Memory", _format_detail_memory(machine)),
+        (machine_rows, "Machine disk", _format_detail_machine_disk(machine)),
+        (machine_rows, "Instance disk limit", _format_gib(machine.get("max_instance_disk_size"))),
+        (machine_rows, "Writable now", _format_gib(detail.get("max_writable_size_in_byte"))),
+        (machine_rows, "OS", machine.get("os_name")),
+        (machine_rows, "Docker", machine.get("docker_version")),
+        (machine_rows, "Kernel", machine.get("kernel_version")),
+        (machine_rows, "NVIDIA Docker", _format_yes_no(machine.get("nvidia_docker"))),
+        (machine_rows, "IP address", machine.get("ip_address")),
+        (machine_rows, "Restarted", _format_timestamp(machine.get("restart_time"))),
+    )
+    for target, label, value in rows:
+        text = _format_value(value)
+        if text != "-":
+            target.append((label, text))
+
+    title = "Instance detail" if not instance_uuid else f"Instance {instance_uuid}"
+    table = Table(title=title)
+    table.add_column("Field")
+    table.add_column("Value")
+    for section, section_rows in sections:
+        if not section_rows:
+            continue
+        table.add_row(section, "", style="bold")
+        for label, value in section_rows:
+            table.add_row(label, value)
+
+    console.print(table)
+
+
 def render_regions(regions: Sequence[dict[str, object]]) -> None:
     """Render the region catalogue as a Rich table.
 

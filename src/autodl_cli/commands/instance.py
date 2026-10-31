@@ -1,8 +1,10 @@
 """``autodl instance`` — instance lifecycle commands.
 
 ``list`` is implemented against ``POST /api/v1/instance``; its ``--query``
-filter is applied locally because the API has no keyword field. The remaining
-lifecycle commands wait for their handlers.
+filter is applied locally because the API has no keyword field. ``detail``
+reads one instance's configuration snapshot from
+``GET /api/v1/instance/snapshot``. The remaining lifecycle commands wait for
+their handlers.
 """
 
 from __future__ import annotations
@@ -97,6 +99,36 @@ def list_command(
         return
 
     output.render_instances(instances)
+
+
+@instance.command("detail", help="Show one instance's configuration and machine details.")
+@click.argument("instance_uuid")
+@click.pass_context
+def detail_command(ctx: click.Context, instance_uuid: str) -> None:
+    """Show one instance's configuration and machine details.
+
+    The snapshot covers the base image, GPU allocation, host machine, and
+    prices. It does not include the live status or SSH command; use
+    ``instance list`` for those.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :raises click.ClickException: When no token is configured or the API call
+        fails.
+    """
+    token = require_token(load_config())
+
+    try:
+        with AutoDLClient(token) as client:
+            detail = instance_handler.get_instance(client, instance_uuid)
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(detail)
+        return
+
+    output.render_instance_detail(detail, instance_uuid=instance_uuid)
 
 
 def register_instance(main_group: click.Group) -> click.Group:

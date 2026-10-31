@@ -75,6 +75,49 @@ INSTANCES = [
 ]
 
 
+INSTANCE_UUID = "9b384da211-e57974ef"
+
+DETAIL = {
+    "image_type": "",
+    "image": {
+        "image_type": "public",
+        "image_name": "base-image-ee43618uo7",
+        "base_image_uuid": "base-image-ee43618uo7",
+        "framework_name": "PyTorch",
+        "framework_version": "2.12.1",
+        "python_version": "3.12(ubuntu22.04)",
+        "cuda_version": "13.0",
+        "cpu_arch": "x86",
+    },
+    "payg_price": 1480,
+    "origin_pay_price": 1560,
+    "snapshot_gpu_alias_name": "RTX 3090",
+    "user_define_gpu_name": "",
+    "chip_corp": "nvidia",
+    "cpu_arch": "x86",
+    "machine_info_snapshot": {
+        "cpu_num": 112,
+        "cpu_name": "Intel(R) Xeon(R) Gold 6330 CPU @ 2.00GHz",
+        "disk_size": 7679364128768,
+        "disk_type": "SSD",
+        "memory": 540651888640,
+        "mem_used": 64424509440,
+        "cpu_used": 14,
+        "max_instance_disk_size": 53687091200,
+        "region_sign": "nm-B2",
+        "region_name": "内蒙B区",
+        "data_center": "neimengDC3",
+        "os_name": "ubuntu18.04",
+        "docker_version": "27.2.0-umd18",
+        "kernel_version": "5.15.0-94-generic",
+        "nvidia_docker": True,
+        "restart_time": "2026-07-02T17:06:57+08:00",
+        "gpu_type": {"name": "RTX 3090", "memory": 25769803776},
+    },
+    "max_writable_size_in_byte": 32212254720,
+}
+
+
 @pytest.fixture
 def home(monkeypatch, tmp_path: Path) -> Path:
     """Point the data tree at an isolated temporary directory.
@@ -367,3 +410,99 @@ def test_list_rejects_page_size_above_server_limit(home: Path, monkeypatch) -> N
 
     assert result.exit_code == 2
     assert "101" in result.output
+
+
+def test_detail_json_returns_raw_snapshot(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler result unchanged."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "get_instance",
+        lambda client, instance_id: DETAIL,
+    )
+
+    result = CliRunner().invoke(main, ["--json", "instance", "detail", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == DETAIL
+    assert TOKEN not in result.output
+
+
+def test_detail_human_output_shows_snapshot(home: Path, monkeypatch) -> None:
+    """The human output groups the snapshot into readable sections."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "get_instance",
+        lambda client, instance_id: DETAIL,
+    )
+    monkeypatch.setattr(output_module, "console", Console(width=160))
+
+    result = CliRunner().invoke(main, ["instance", "detail", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert f"Instance {INSTANCE_UUID}" in result.output
+    for header in ("Instance", "Image", "Machine", "Field", "Value"):
+        assert header in result.output
+    assert "RTX 3090 (nvidia)" in result.output
+    assert "24G" in result.output
+    assert "¥1.480/h (list ¥1.560/h)" in result.output
+    assert "PyTorch 2.12.1" in result.output
+    assert "3.12(ubuntu22.04)" in result.output
+    assert "内蒙B区 (nm-B2)" in result.output
+    assert "14 used / 112 total" in result.output
+    assert "60G / " in result.output
+    assert "7.0T SSD" in result.output
+    assert "50G" in result.output
+    assert "30G" in result.output
+    assert "ubuntu18.04" in result.output
+    assert "2026-07-02 17:06:57" in result.output
+    assert TOKEN not in result.output
+
+
+def test_detail_forwards_instance_uuid(home: Path, monkeypatch) -> None:
+    """The positional UUID reaches the handler unchanged."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_get_instance(client, instance_id):
+        captured["instance_id"] = instance_id
+        return DETAIL
+
+    monkeypatch.setattr(instance_commands.instance_handler, "get_instance", fake_get_instance)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "detail", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert captured["instance_id"] == INSTANCE_UUID
+
+
+def test_detail_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "get_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["--json", "instance", "detail", INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_detail_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_get_instance(client, instance_id):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "get_instance", failing_get_instance)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "detail", INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output

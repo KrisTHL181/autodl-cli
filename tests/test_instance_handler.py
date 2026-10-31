@@ -30,6 +30,32 @@ INSTANCES = [
     },
 ]
 
+INSTANCE_UUID = "9b384da211-e57974ef"
+
+SNAPSHOT = {
+    "image_type": "",
+    "image": {
+        "image_type": "public",
+        "image_name": "base-image-ee43618uo7",
+        "base_image_uuid": "base-image-ee43618uo7",
+        "framework_name": "PyTorch",
+        "framework_version": "2.12.1",
+        "python_version": "3.12(ubuntu22.04)",
+        "cuda_version": "13.0",
+        "cpu_arch": "x86",
+    },
+    "payg_price": 1480,
+    "origin_pay_price": 1560,
+    "snapshot_gpu_alias_name": "RTX 3090",
+    "user_define_gpu_name": "",
+    "chip_corp": "nvidia",
+    "machine_info_snapshot": {
+        "region_name": "内蒙B区",
+        "region_sign": "nm-B2",
+        "gpu_type": {"name": "RTX 3090", "memory": 25769803776},
+    },
+}
+
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
@@ -267,6 +293,61 @@ def test_list_instances_query_filters_locally_without_reaching_the_body(
     assert [instance["uuid"] for instance in result] == expected
     assert bodies
     assert all("query" not in body for body in bodies)
+
+
+def test_get_instance_requests_snapshot_endpoint() -> None:
+    """The handler sends an authenticated GET with the instance UUID as a query parameter."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = request.content
+        return _success(SNAPSHOT)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        assert instance_handler.get_instance(client, INSTANCE_UUID) == SNAPSHOT
+
+    assert seen == {
+        "method": "GET",
+        "path": "/api/v1/instance/snapshot",
+        "params": {"instance_uuid": INSTANCE_UUID},
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": b"",
+    }
+
+
+def test_get_instance_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-7"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError) as excinfo:
+            instance_handler.get_instance(client, INSTANCE_UUID)
+
+    assert "login timed out" in str(excinfo.value)
+    assert "req-7" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("data", [None, [], "not-an-object"])
+def test_get_instance_malformed_data_raises_api_error(data: object) -> None:
+    """A successful envelope whose ``data`` is not an object is malformed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(data)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="malformed data"):
+            instance_handler.get_instance(client, INSTANCE_UUID)
 
 
 def test_list_instances_query_ignores_non_string_and_missing_fields() -> None:
