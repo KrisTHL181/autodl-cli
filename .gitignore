@@ -21,3 +21,6 @@ tests/.state/
 
 # local Claude Code instructions
 /CLAUDE.md
+
+# written by .github/scripts/release_notes.py when previewing locally
+release_notes.md

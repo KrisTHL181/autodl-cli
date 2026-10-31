@@ -4,34 +4,58 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write      # create the GitHub Release
+  id-token: write      # PyPI trusted publishing (OIDC) and build attestations
+
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          # setuptools-scm turns the pushed tag into the package version.
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
+          fetch-depth: 0   # setuptools-scm needs the tags to derive the version
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: pip install build twine
       - run: python -m build
       - run: python -m twine check dist/*
-      - uses: actions/upload-artifact@v4
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          name: dist
-          path: dist/
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+          attestations: true   # SLSA provenance; needs id-token: write
+      - name: Generate release notes
+        continue-on-error: true   # a notes failure must not block the release; the script always writes a usable file
+        timeout-minutes: 5        # without this, a hung urllib call would run until the job's six-hour limit
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_API_BASE: ${{ vars.LLM_API_BASE }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          GH_TOKEN: ${{ github.token }}   # only to read merged PR descriptions; degrades to commit subjects
+        run: |
+          # A failed step earlier in the same run may have left a partial file.
+          rm -f release_notes.md
+          # Derive the tag from GITHUB_REF: GITHUB_REF_NAME truncates tags that contain a slash.
+          TAG="${GITHUB_REF#refs/tags/}"
+          python .github/scripts/release_notes.py --tag "$TAG" --output release_notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # The step above is best effort, but the release body must never be empty.
+          if [ ! -s release_notes.md ]; then
+            printf '> Release notes could not be generated for this tag.\n' > release_notes.md
+            {
+              echo "### Release notes"
+              echo
+              echo "The notes script produced no output, so this release carries a placeholder body."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # --verify-tag is a cheap self-check: on a mismatch this fails instead of
+          # letting gh create a release on the default branch's HEAD.
+          gh release create "$TAG" dist/*.tar.gz dist/*.whl \
+            --title "$TAG" \
+            --verify-tag \
+            --notes-file release_notes.md
