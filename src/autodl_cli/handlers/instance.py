@@ -36,9 +36,6 @@ instance UUID string rather than an object, so :func:`create_instance` unwraps
 it with :func:`require_success_any` and returns a flat order record.
 :func:`select_machine` resolves a region and GPU model to the first orderable
 machine with enough idle cards.
-
-TODO: implement :func:`get_instance_status` and return the structures defined
-in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
 
 from __future__ import annotations
@@ -249,16 +246,6 @@ def get_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
         params={"instance_uuid": instance_id},
     )
     return require_success(payload, action="instance detail")
-
-
-def get_instance_status(client: AutoDLClient, instance_id: str) -> dict[str, object]:
-    """Return one instance's current status.
-
-    :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
-    :returns: The status mapping.
-    """
-    ...
 
 
 def create_instance(

@@ -6,6 +6,6 @@ its subcommands to the root Click group.
 
 from __future__ import annotations
 
-from autodl_cli.commands._helpers import parse_instance_id, require_token
+from autodl_cli.commands._helpers import require_token
 
-__all__ = ["parse_instance_id", "require_token"]
+__all__ = ["require_token"]

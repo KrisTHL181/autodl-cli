@@ -1,22 +1,11 @@
 """Shared helpers for command modules.
 
-Command authors should use these instead of reimplementing argument
-normalisation or token handling.
+Command authors should use these instead of reimplementing token handling.
 """
 
 from __future__ import annotations
 
 import click
-
-
-def parse_instance_id(value: str) -> str:
-    """Normalise an instance identifier from the command line.
-
-    :param value: Raw ``--instance`` value or positional argument.
-    :returns: The canonical instance ID.
-    :raises click.BadParameter: When the value is not a valid instance ID.
-    """
-    ...
 
 
 def require_token(config: dict[str, object]) -> str:

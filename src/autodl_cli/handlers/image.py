@@ -338,12 +338,3 @@ def delete_private_image(client: AutoDLClient, image_id: int) -> dict[str, objec
     require_success_any(payload, action="delete private image")
 
     return {"image_id": image_id, "deleted": True}
-
-
-def get_create_options(client: AutoDLClient) -> dict[str, object]:
-    """Return the options accepted when creating an instance.
-
-    :param client: Authenticated API client.
-    :returns: The create-options mapping.
-    """
-    ...

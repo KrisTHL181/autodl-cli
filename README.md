@@ -258,7 +258,6 @@ src/autodl_cli/
 ├── config.py              # read/write ~/.autodl-cli/config.toml (atomic, 0600)
 ├── paths.py               # the data directory, resolved in one place
 ├── errors.py              # AutoDLError hierarchy
-├── models.py              # shared data structures (TODO)
 ├── output.py              # all Rich rendering and --json output
 ├── commands/              # argument parsing, one module per domain
 │   ├── _helpers.py        # shared token/ID helpers
@@ -277,7 +276,7 @@ src/autodl_cli/
 │   ├── instance.py
 │   ├── tools.py
 │   └── nfs.py             # placeholder
-├── utils/wait.py          # rate-limit helpers (TODO)
+├── utils/wait.py          # jittered sleep helper
 └── mcp/
     ├── generate.py        # AutoDL-specific click2mcp configuration
     └── server.py          # autodl-mcp stdio entry point
@@ -366,9 +365,8 @@ The codebase is laid out for extensibility:
   print, and go through `AutoDLClient` instead of `httpx`.
 - **New MCP tool?** Nothing to do — typed tools are generated from the Click tree.
 
-`nfs` and `config` command groups, the image create options, and the rest of
-the instance lifecycle (`create`) is not implemented yet; their modules exist
-as placeholders.
+The `nfs` and `config` command groups are not implemented yet; their modules
+exist as placeholders.
 
 Run the formatter before submitting:
 
