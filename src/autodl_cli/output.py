@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.table import Table
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 #: Shared console; Rich disables colour automatically when stdout is not a TTY.
 console = Console()
@@ -29,6 +29,52 @@ def render_json(payload: object) -> None:
     :param payload: JSON-serialisable data.
     """
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def render_curl(command: str) -> None:
+    """Print a generated curl command verbatim.
+
+    Plain ``print`` is used instead of Rich so the command is neither wrapped
+    nor interpreted as markup.
+
+    :param command: Shell command to display.
+    """
+    print(command)
+
+
+def render_http_response(
+    *,
+    status: int,
+    reason: str,
+    headers: Mapping[str, str],
+    body: str,
+    json_body: object,
+    is_json: bool,
+    include_headers: bool,
+) -> None:
+    """Print a raw HTTP response.
+
+    Plain ``print`` is used instead of Rich so debug output is neither wrapped
+    nor interpreted as markup. When ``include_headers`` is set, the status line
+    and response headers precede the body, separated by a blank line.
+
+    :param status: HTTP status code.
+    :param reason: HTTP reason phrase.
+    :param headers: Response headers.
+    :param body: Raw response text.
+    :param json_body: Parsed response body when ``is_json`` is set.
+    :param is_json: Whether the response body parsed as JSON.
+    :param include_headers: Whether to print the status line and headers.
+    """
+    if include_headers:
+        print(f"HTTP {status} {reason}")
+        for key, value in headers.items():
+            print(f"{key}: {value}")
+        print()
+    if is_json:
+        print(json.dumps(json_body, ensure_ascii=False, indent=2))
+    else:
+        print(body)
 
 
 def render_table(rows: Sequence[dict[str, object]], columns: Sequence[str]) -> None:

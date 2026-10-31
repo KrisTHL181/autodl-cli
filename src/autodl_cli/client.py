@@ -15,6 +15,7 @@ import httpx
 from autodl_cli.errors import APIError, AuthError, NotFoundError, RateLimitError
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import TracebackType
 
 #: Root of the public AutoDL website, which also serves the developer API.
@@ -84,21 +85,47 @@ class AutoDLClient:
 
         :param token: AutoDL API token; an empty or ``None`` value sends no
             ``Authorization`` header.
-        :param base_url: API root, without a trailing slash.
+        :param base_url: API root; a trailing slash is stripped.
         :param timeout: Per-request timeout in seconds.
         :param transport: Optional httpx transport, used by offline tests to
             inject :class:`httpx.MockTransport`.
         """
         self._token = token or ""
-        headers = {"AppVersion": APP_VERSION, "Accept": "application/json"}
-        if self._token:
-            headers["Authorization"] = self._token
+        self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
-            base_url=base_url,
+            base_url=self.base_url,
             timeout=timeout,
             transport=transport,
-            headers=headers,
         )
+
+    def headers_for(
+        self,
+        extra: Mapping[str, str] | None = None,
+        *,
+        include_auth: bool = True,
+        app_version: bool = True,
+    ) -> dict[str, str]:
+        """Build the headers for one request.
+
+        :param extra: Per-request headers, which override the defaults
+            regardless of case.
+        :param include_auth: Whether to attach the ``Authorization`` header
+            when a token is configured.
+        :param app_version: Whether to attach the mandatory ``AppVersion``
+            header.
+        :returns: The effective request headers.
+        """
+        headers = {"Accept": "application/json"}
+        if app_version:
+            headers["AppVersion"] = APP_VERSION
+        if include_auth and self._token:
+            headers["Authorization"] = self._token
+        if extra:
+            overridden = {name.lower() for name in extra}
+            for name in [key for key in headers if key.lower() in overridden]:
+                del headers[name]
+            headers.update(extra)
+        return headers
 
     def request(self, method: str, path: str, **kwargs: Any) -> dict[str, object]:
         """Send one API request and return its decoded JSON object.
@@ -113,8 +140,9 @@ class AutoDLClient:
         :raises autodl_cli.errors.APIError: On a transport failure, any other
             non-2xx response, or an invalid/non-object JSON body.
         """
+        headers = self.headers_for(kwargs.pop("headers", None))
         try:
-            response = self._client.request(method, path, **kwargs)
+            response = self._client.request(method, path, headers=headers, **kwargs)
         except httpx.RequestError as exc:
             raise APIError(f"Request to {method.upper()} {path} failed: {exc}") from exc
 
@@ -135,6 +163,39 @@ class AutoDLClient:
         if not isinstance(payload, dict):
             raise APIError(f"AutoDL API returned a non-object JSON body for {method.upper()} {path} (HTTP {status})")
         return payload
+
+    def raw_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        include_auth: bool = True,
+        app_version: bool = True,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send one request without validating or decoding the response.
+
+        This is the debugging entry point behind ``autodl tools request``. It
+        merges ``headers`` with :meth:`headers_for` and returns the response
+        unchanged, so the caller can inspect non-2xx statuses and arbitrary
+        bodies.
+
+        :param method: HTTP method.
+        :param url: Absolute URL, or a path relative to ``base_url``.
+        :param headers: Per-request headers, which override the defaults.
+        :param include_auth: Whether to attach the ``Authorization`` header
+            when a token is configured.
+        :param app_version: Whether to attach the ``AppVersion`` header.
+        :param kwargs: Extra arguments forwarded to the underlying client.
+        :returns: The raw httpx response.
+        :raises autodl_cli.errors.APIError: On a transport failure.
+        """
+        request_headers = self.headers_for(headers, include_auth=include_auth, app_version=app_version)
+        try:
+            return self._client.request(method, url, headers=request_headers, **kwargs)
+        except httpx.RequestError as exc:
+            raise APIError(f"Request to {method.upper()} {url} failed: {exc}") from exc
 
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""

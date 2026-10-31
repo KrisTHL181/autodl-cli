@@ -16,6 +16,7 @@ from autodl_cli.commands.config import register_config
 from autodl_cli.commands.image import register_image
 from autodl_cli.commands.instance import register_instance
 from autodl_cli.commands.nfs import register_nfs
+from autodl_cli.commands.tools import register_tools
 
 
 @click.group(help="Manage AutoDL container instances from the command line.")
@@ -37,6 +38,7 @@ register_config(main)
 register_image(main)
 register_instance(main)
 register_nfs(main)
+register_tools(main)
 
 
 if __name__ == "__main__":
