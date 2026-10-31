@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from autodl_cli import __version__
 from autodl_cli.errors import APIError, AuthError
+from autodl_cli.handlers._common import require_success
 
 if TYPE_CHECKING:
     from autodl_cli.client import AutoDLClient
@@ -62,31 +63,6 @@ def describe_device() -> dict[str, object]:
     }
 
 
-def _require_success(payload: dict[str, object], *, action: str) -> dict[str, object]:
-    """Validate an API envelope and return its ``data`` object.
-
-    :param payload: Decoded API response.
-    :param action: Human-readable step name used in error messages.
-    :returns: The ``data`` mapping.
-    :raises autodl_cli.errors.AuthError: When ``code`` is not ``"Success"``.
-    :raises autodl_cli.errors.APIError: When a successful response has no
-        object-valued ``data`` field.
-    """
-    if payload.get("code") == "Success":
-        data = payload.get("data")
-        if isinstance(data, dict):
-            return data
-        raise APIError(f"AutoDL {action} returned malformed data")
-
-    message = payload.get("msg")
-    if not isinstance(message, str) or not message:
-        message = f"AutoDL {action} failed"
-    request_id = payload.get("request_id")
-    if isinstance(request_id, str) and request_id:
-        message = f"{message} (request_id: {request_id})"
-    raise AuthError(message)
-
-
 def login(
     client: AutoDLClient,
     phone: str,
@@ -125,7 +101,7 @@ def login(
         "device_fingerprint": fingerprint,
     }
     login_response = client.request("POST", "/api/v1/new_login", json=login_payload)
-    login_data = _require_success(login_response, action="login")
+    login_data = require_success(login_response, action="login", error_type=AuthError)
 
     ticket = login_data.get("ticket")
     if not isinstance(ticket, str) or not ticket:
@@ -138,7 +114,7 @@ def login(
         "/api/v1/passport",
         json={"ticket": ticket, "device": describe_device()},
     )
-    passport_data = _require_success(passport_response, action="passport exchange")
+    passport_data = require_success(passport_response, action="passport exchange", error_type=AuthError)
 
     token = passport_data.get("token")
     if not isinstance(token, str) or not token:
@@ -161,4 +137,4 @@ def get_current_user(client: AutoDLClient) -> dict[str, object]:
         object-valued ``data`` field.
     """
     payload = client.request("GET", "/api/v1/user/detail")
-    return _require_success(payload, action="user detail")
+    return require_success(payload, action="user detail", error_type=AuthError)

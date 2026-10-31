@@ -2,17 +2,18 @@
 
 Code that consumes autodl-toolkit as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
-handler surface for both password login and browser-token lookup, and
-normalises internal exceptions into the
+handler surface for password login, browser-token lookup, and account balance,
+and normalises internal exceptions into the
 :class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
 from __future__ import annotations
 
 from autodl_cli.client import AutoDLClient
+from autodl_cli.handlers import account as account_handler
 from autodl_cli.handlers import auth as auth_handler
 
-__all__ = ["AutoDLClient", "get_current_user", "login"]
+__all__ = ["AutoDLClient", "get_balance", "get_current_user", "login"]
 
 
 def login(
@@ -41,6 +42,19 @@ def login(
             phone_area=phone_area,
             device_fingerprint=device_fingerprint,
         )
+
+
+def get_balance(token: str, *, charge_type: str = "payg") -> dict[str, object]:
+    """Return the account balance for one billing mode.
+
+    :param token: AutoDL API token obtained by logging in.
+    :param charge_type: Billing mode to query, ``"payg"`` by default.
+    :returns: The wallet mapping; monetary fields are raw thousandths of a yuan.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return account_handler.get_balance(client, charge_type=charge_type)
 
 
 def get_current_user(token: str) -> dict[str, object]:
