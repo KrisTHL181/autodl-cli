@@ -651,3 +651,334 @@ def test_release_instance_failure_raises_api_error() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(APIError, match="no such instance"):
             instance_handler.release_instance(client, RELEASE_INSTANCE_UUID)
+
+
+MACHINE_ID = "1c0641804d"
+BASE_IMAGE_UUID = "base-image-ee43618uo7"
+PRIVATE_IMAGE_UUID = "image-abcd1234"
+NEW_INSTANCE_UUID = "1c0641804d-de35343b"
+
+CREATE_BODY = {
+    "instance_info": {
+        "machine_id": MACHINE_ID,
+        "charge_type": "payg",
+        "req_gpu_amount": 2,
+        "base_image_uuid": BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "reproduction_uuid": "",
+        "cg_application_uuid": "",
+        "cg_application_info": {
+            "image_name": "",
+            "current_version_id": 0,
+            "current_version": "",
+            "image_id": 0,
+        },
+        "instance_name": "trainer",
+        "expand_data_disk": 50,
+        "reproduction_id": 0,
+    },
+    "price_info": {
+        "coupon_id_list": [],
+        "machine_id": MACHINE_ID,
+        "charge_type": "payg",
+        "duration": 1,
+        "num": 1,
+        "expand_data_disk": 50,
+    },
+}
+
+
+def test_create_instance_posts_console_body_and_unwraps_uuid() -> None:
+    """The handler trims inputs, POSTs the captured body, and returns a flat record."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(NEW_INSTANCE_UUID)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.create_instance(
+            client,
+            machine_id=f" {MACHINE_ID} ",
+            base_image_uuid=BASE_IMAGE_UUID,
+            gpu_amount=2,
+            instance_name=" trainer ",
+            expand_data_disk=50,
+        )
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/order/instance/create/payg",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": CREATE_BODY,
+    }
+    assert result == {
+        "instance_uuid": NEW_INSTANCE_UUID,
+        "machine_id": MACHINE_ID,
+        "gpu_amount": 2,
+        "charge_type": "payg",
+        "base_image_uuid": BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "instance_name": "trainer",
+        "expand_data_disk": 50,
+    }
+
+
+def test_create_instance_private_image_variant() -> None:
+    """A private-image order sends that UUID and leaves the base image blank."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(NEW_INSTANCE_UUID)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.create_instance(
+            client,
+            machine_id=MACHINE_ID,
+            private_image_uuid=PRIVATE_IMAGE_UUID,
+        )
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["instance_info"]["base_image_uuid"] == ""
+    assert body["instance_info"]["private_image_uuid"] == PRIVATE_IMAGE_UUID
+    assert body["instance_info"]["req_gpu_amount"] == 1
+    assert body["instance_info"]["instance_name"] == ""
+    assert body["instance_info"]["expand_data_disk"] == 0
+    assert body["price_info"]["duration"] == 1
+    assert body["price_info"]["num"] == 1
+    assert result["private_image_uuid"] == PRIVATE_IMAGE_UUID
+
+
+@pytest.mark.parametrize("data", [None, 123, {"uuid": NEW_INSTANCE_UUID}, ["x"], "", "   "])
+def test_create_instance_malformed_uuid_raises_api_error(data: object) -> None:
+    """A successful envelope whose ``data`` is not a non-empty string is malformed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(data)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="malformed data"):
+            instance_handler.create_instance(client, machine_id=MACHINE_ID, base_image_uuid=BASE_IMAGE_UUID)
+
+
+def test_create_instance_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "MachineNotEnoughGpu", "msg": "no capacity", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no capacity"):
+            instance_handler.create_instance(client, machine_id=MACHINE_ID, base_image_uuid=BASE_IMAGE_UUID)
+
+
+def test_create_instance_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-13"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.create_instance(client, machine_id=MACHINE_ID, base_image_uuid=BASE_IMAGE_UUID)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"machine_id": "", "base_image_uuid": BASE_IMAGE_UUID}, "machine_id must not be empty"),
+        ({"machine_id": "   ", "base_image_uuid": BASE_IMAGE_UUID}, "machine_id must not be empty"),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "gpu_amount": 0},
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "gpu_amount": -2},
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "gpu_amount": True},
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "expand_data_disk": -1},
+            "expand_data_disk must not be negative",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "expand_data_disk": True},
+            "expand_data_disk must not be negative",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": BASE_IMAGE_UUID, "private_image_uuid": PRIVATE_IMAGE_UUID},
+            "exactly one of base_image_uuid and private_image_uuid must be set",
+        ),
+        (
+            {"machine_id": MACHINE_ID, "base_image_uuid": "  ", "private_image_uuid": "  "},
+            "exactly one of base_image_uuid and private_image_uuid must be set",
+        ),
+    ],
+)
+def test_create_instance_rejects_invalid_arguments(kwargs: dict[str, object], message: str) -> None:
+    """Invalid order parameters fail before any request is sent."""
+    with pytest.raises(ValueError, match=message):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.create_instance(client, **kwargs)
+
+
+REGION_LIST = [
+    {
+        "data_center": "westDC3",
+        "region_sign": "west-B",
+        "region_name": "西北B区",
+        "visible": True,
+        "used_for": "gpu",
+    },
+    {
+        "data_center": "westDC3",
+        "region_sign": "west-C",
+        "region_name": "西北B区",
+        "visible": True,
+        "used_for": "gpu",
+    },
+]
+
+
+def _machine(machine_id: str, gpu_name: str, idle: int) -> dict[str, object]:
+    """Build a minimal machine record the normaliser accepts.
+
+    :param machine_id: Machine identifier.
+    :param gpu_name: GPU model name.
+    :param idle: Idle GPU count.
+    :returns: A machine-record mapping.
+    """
+    return {
+        "machine_id": machine_id,
+        "gpu_name": gpu_name,
+        "gpu_number": 8,
+        "gpu_idle_num": idle,
+    }
+
+
+def test_select_machine_picks_first_matching_machine_with_capacity() -> None:
+    """The first matching machine with enough idle cards is returned."""
+    bodies: list[dict[str, object]] = []
+    machines = [
+        _machine("m-other", "RTX 3080", 8),
+        _machine("m-first", "RTX 3090", 2),
+        _machine("m-second", "RTX 3090", 8),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/common":
+            return _success({"region_list": REGION_LIST})
+        if request.method == "POST" and request.url.path == "/api/v1/user/machine/list":
+            bodies.append(json.loads(request.content))
+            return _success({"list": machines, "max_page": 1})
+        pytest.fail(f"unexpected request {request.method} {request.url.path}")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        selected = instance_handler.select_machine(client, region=" 西北B区 ", gpu=" RTX 3090 ", gpu_amount=2)
+
+    assert selected["machine_id"] == "m-first"
+    assert selected["gpu_idle_num"] == 2
+    assert bodies == [
+        {
+            "charge_type": "payg",
+            "region_sign": "",
+            "gpu_type_name": ["RTX 3090"],
+            "machine_tag_name": [],
+            "gpu_idle_num": 2,
+            "mount_net_disk": False,
+            "instance_disk_size_order": "",
+            "pay_price_order": "",
+            "gpu_idle_type": "",
+            "date_range": "",
+            "date_from": "",
+            "date_to": "",
+            "page_index": 1,
+            "page_size": 1000,
+            "default_order": True,
+            "region_sign_list": ["west-B", "west-C"],
+            "cpu_arch": [],
+            "chip_corp": [],
+            "machine_id": "",
+        }
+    ]
+
+
+def test_select_machine_matches_gpu_name_case_insensitively() -> None:
+    """The GPU model comparison ignores surrounding space and letter case."""
+    machines = [_machine("m-1", "rtx 3090", 4)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success({"region_list": REGION_LIST})
+        return _success({"list": machines, "max_page": 1})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        selected = instance_handler.select_machine(client, region="west-B", gpu="RTX 3090")
+
+    assert selected["machine_id"] == "m-1"
+
+
+def test_select_machine_raises_when_no_machine_has_capacity() -> None:
+    """A listing without a matching model raises a descriptive :class:`APIError`."""
+    machines = [_machine("m-1", "RTX 3080", 8)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success({"region_list": REGION_LIST})
+        return _success({"list": machines, "max_page": 1})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(
+            APIError,
+            match=r"No machine with 2 idle 'RTX 3090' GPU\(s\) in region 'west-B'",
+        ):
+            instance_handler.select_machine(client, region="west-B", gpu="RTX 3090", gpu_amount=2)
+
+
+def test_select_machine_unknown_region_raises_value_error() -> None:
+    """An unknown region surfaces the catalogue's clean :class:`ValueError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/common":
+            return _success({"region_list": REGION_LIST})
+        pytest.fail("the machine listing must not be queried for an unknown region")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="Unknown region 'nowhere'"):
+            instance_handler.select_machine(client, region="nowhere", gpu="RTX 3090")
+
+
+@pytest.mark.parametrize(
+    ("region", "gpu", "gpu_amount", "message"),
+    [
+        ("", "RTX 3090", 1, "region must not be empty"),
+        ("  ", "RTX 3090", 1, "region must not be empty"),
+        ("west-B", "", 1, "gpu must not be empty"),
+        ("west-B", "   ", 1, "gpu must not be empty"),
+        ("west-B", "RTX 3090", 0, "gpu_amount must be at least 1"),
+        ("west-B", "RTX 3090", True, "gpu_amount must be at least 1"),
+    ],
+)
+def test_select_machine_rejects_invalid_arguments(
+    region: str,
+    gpu: str,
+    gpu_amount: int,
+    message: str,
+) -> None:
+    """Blank identifiers and a non-positive GPU count fail before any request."""
+    with pytest.raises(ValueError, match=message):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.select_machine(client, region=region, gpu=gpu, gpu_amount=gpu_amount)

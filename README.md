@@ -153,6 +153,10 @@ autodl instance release <instance-uuid>
 autodl instance release <instance-uuid> --yes
 autodl instance save-image <instance-uuid> my-image
 autodl instance save-image <instance-uuid> my-image --try-again
+autodl instance create --machine-id 1c0641804d --image base-image-ee43618uo7
+autodl instance create --region nm-B2 --gpu "RTX 3090" --image base-image-ee43618uo7
+autodl instance create --machine-id 1c0641804d --private-image image-abcd1234 \
+  --gpu-num 2 --name trainer --data-disk 50
 ```
 
 `power-on` posts to `/api/v1/instance/power_on`; AutoDL accepts the request
@@ -165,6 +169,16 @@ immediately; it is irreversible, so the command asks for confirmation unless
 `--yes` is passed. `save-image` posts to
 `/api/v1/instance/image/save`; AutoDL accepts the request immediately, and the
 image appears under the account's private images once the save finishes.
+
+`create` posts to `/api/v1/order/instance/create/payg` and orders a
+pay-as-you-go instance. Pass either `--machine-id` or both `--region` and
+`--gpu`; with the latter the first machine in that region with enough idle
+cards of the requested model is ordered on. Use `--image` for a base image or
+`--private-image` for an image saved from an instance, but not both.
+`--gpu-num`, `--name`, and `--data-disk` set the GPU count (default 1), the
+instance name, and extra data-disk size in GB (default 0). The command returns
+the new instance UUID immediately — the instance may take a moment to appear in
+`instance list` — and does not prompt for confirmation.
 
 ### 🛠️ API Debugging
 

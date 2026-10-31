@@ -30,8 +30,15 @@ Releasing an instance posts to ``POST /api/v1/instance/release`` with the same
 irreversible: the instance and its data disk are deleted. It does not go through
 the power-off endpoint first.
 
-TODO: implement the remaining lifecycle handlers and return the structures
-defined in :mod:`autodl_cli.models` instead of raw response dictionaries.
+Creating a pay-as-you-go instance posts the web console's order body to
+``POST /api/v1/order/instance/create/payg``. Its ``data`` field is the new
+instance UUID string rather than an object, so :func:`create_instance` unwraps
+it with :func:`require_success_any` and returns a flat order record.
+:func:`select_machine` resolves a region and GPU model to the first orderable
+machine with enough idle cards.
+
+TODO: implement :func:`get_instance_status` and return the structures defined
+in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
+from autodl_cli.handlers import gpu as gpu_handler
 from autodl_cli.handlers._common import require_success, require_success_any
 
 if TYPE_CHECKING:
@@ -63,6 +71,12 @@ INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
 
 #: Path of the release endpoint.
 INSTANCE_RELEASE_PATH = "/api/v1/instance/release"
+
+#: Path of the pay-as-you-go instance-create endpoint.
+INSTANCE_CREATE_PATH = "/api/v1/order/instance/create/payg"
+
+#: Billing mode used by the instance-create endpoint.
+CREATE_CHARGE_TYPE = "payg"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
@@ -247,14 +261,167 @@ def get_instance_status(client: AutoDLClient, instance_id: str) -> dict[str, obj
     ...
 
 
-def create_instance(client: AutoDLClient, options: dict[str, object]) -> dict[str, object]:
-    """Create an instance.
+def create_instance(
+    client: AutoDLClient,
+    *,
+    machine_id: str,
+    base_image_uuid: str = "",
+    private_image_uuid: str = "",
+    gpu_amount: int = 1,
+    instance_name: str = "",
+    expand_data_disk: int = 0,
+) -> dict[str, object]:
+    """Order a pay-as-you-go instance on one machine.
+
+    ``POST /api/v1/order/instance/create/payg`` answers with the new instance
+    UUID as a bare string under ``data``, not as an object. Success is therefore
+    checked with :func:`require_success_any` and the string is validated before
+    it is returned.
+
+    Exactly one of ``base_image_uuid`` and ``private_image_uuid`` must be set.
+    The request is accepted immediately; the instance may take a moment to
+    appear in ``instance list``.
 
     :param client: Authenticated API client.
-    :param options: Order parameters (image, GPU type, region, …).
-    :returns: The created instance mapping.
+    :param machine_id: Machine to order on, from ``gpu machines``.
+    :param base_image_uuid: Base-image UUID from ``image list``.
+    :param private_image_uuid: Private-image UUID from ``image list-private``.
+    :param gpu_amount: Number of GPUs to request; must be at least 1.
+    :param instance_name: Optional instance name; surrounding whitespace is
+        stripped.
+    :param expand_data_disk: Extra data-disk size in GB; must not be negative.
+    :returns: A mapping with ``instance_uuid``, ``machine_id``, ``gpu_amount``,
+        ``charge_type``, ``base_image_uuid``, ``private_image_uuid``,
+        ``instance_name``, and ``expand_data_disk``.
+    :raises ValueError: When ``machine_id`` is blank, ``gpu_amount`` is below 1,
+        ``expand_data_disk`` is negative, or not exactly one image UUID is set.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
     """
-    ...
+    machine = machine_id.strip()
+    if not machine:
+        raise ValueError("machine_id must not be empty")
+    if isinstance(gpu_amount, bool) or gpu_amount < 1:
+        raise ValueError("gpu_amount must be at least 1")
+    if isinstance(expand_data_disk, bool) or expand_data_disk < 0:
+        raise ValueError("expand_data_disk must not be negative")
+
+    base_image = base_image_uuid.strip()
+    private_image = private_image_uuid.strip()
+    if bool(base_image) == bool(private_image):
+        raise ValueError("exactly one of base_image_uuid and private_image_uuid must be set")
+    name = instance_name.strip()
+
+    body: dict[str, object] = {
+        "instance_info": {
+            "machine_id": machine,
+            "charge_type": CREATE_CHARGE_TYPE,
+            "req_gpu_amount": gpu_amount,
+            "base_image_uuid": base_image,
+            "private_image_uuid": private_image,
+            "reproduction_uuid": "",
+            "cg_application_uuid": "",
+            "cg_application_info": {
+                "image_name": "",
+                "current_version_id": 0,
+                "current_version": "",
+                "image_id": 0,
+            },
+            "instance_name": name,
+            "expand_data_disk": expand_data_disk,
+            "reproduction_id": 0,
+        },
+        "price_info": {
+            "coupon_id_list": [],
+            "machine_id": machine,
+            "charge_type": CREATE_CHARGE_TYPE,
+            "duration": 1,
+            "num": 1,
+            "expand_data_disk": expand_data_disk,
+        },
+    }
+    payload = client.request("POST", INSTANCE_CREATE_PATH, json=body)
+    data = require_success_any(payload, action="create instance")
+    if not isinstance(data, str) or not data.strip():
+        raise APIError("AutoDL create instance returned malformed data")
+    instance_uuid = data.strip()
+
+    return {
+        "instance_uuid": instance_uuid,
+        "machine_id": machine,
+        "gpu_amount": gpu_amount,
+        "charge_type": CREATE_CHARGE_TYPE,
+        "base_image_uuid": base_image,
+        "private_image_uuid": private_image,
+        "instance_name": name,
+        "expand_data_disk": expand_data_disk,
+    }
+
+
+def select_machine(
+    client: AutoDLClient,
+    *,
+    region: str,
+    gpu: str,
+    gpu_amount: int = 1,
+) -> dict[str, object]:
+    """Resolve a region and GPU model to an orderable machine.
+
+    The region identifier is resolved through the region catalogue, then the
+    machine listing for that data center is searched for the first machine
+    whose GPU name matches ``gpu`` case-insensitively and that has at least
+    ``gpu_amount`` idle cards. The description is advisory: the order can still
+    fail if another user takes the capacity first.
+
+    :param client: Authenticated API client.
+    :param region: Region sign, data center, or region name.
+    :param gpu: Exact GPU model name to require.
+    :param gpu_amount: Number of idle GPUs the machine must have; must be at
+        least 1.
+    :returns: The normalised machine mapping from :func:`list_machines`.
+    :raises ValueError: When ``region`` or ``gpu`` is blank, ``gpu_amount`` is
+        below 1, or the region is unknown.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or no
+        machine has enough idle capacity.
+    """
+    region_text = region.strip()
+    if not region_text:
+        raise ValueError("region must not be empty")
+    gpu_text = gpu.strip()
+    if not gpu_text:
+        raise ValueError("gpu must not be empty")
+    if isinstance(gpu_amount, bool) or gpu_amount < 1:
+        raise ValueError("gpu_amount must be at least 1")
+
+    regions = gpu_handler.select_regions(gpu_handler.list_regions(client), [region_text])
+    page = gpu_handler.list_machines(
+        client,
+        charge_type=CREATE_CHARGE_TYPE,
+        region_signs=gpu_handler.region_signs(regions[0]),
+        gpu_types=(gpu_text,),
+        gpu_idle_num=gpu_amount,
+        all_pages=True,
+    )
+
+    machines = page.get("machines")
+    if isinstance(machines, list):
+        for machine in machines:
+            if not isinstance(machine, dict):
+                continue
+            gpu_name = machine.get("gpu_name")
+            idle = machine.get("gpu_idle_num")
+            if (
+                isinstance(gpu_name, str)
+                and gpu_name.strip().casefold() == gpu_text.casefold()
+                and isinstance(idle, int)
+                and not isinstance(idle, bool)
+                and idle >= gpu_amount
+            ):
+                return machine
+
+    raise APIError(f"No machine with {gpu_amount} idle {gpu!r} GPU(s) in region {region!r}")
 
 
 def power_on(client: AutoDLClient, instance_id: str) -> dict[str, object]:

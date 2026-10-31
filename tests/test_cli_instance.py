@@ -884,3 +884,239 @@ def test_release_api_failure_is_a_clean_click_exception(home: Path, monkeypatch)
     assert result.exit_code == 1
     assert "token expired" in result.output
     assert "Traceback" not in result.output
+
+
+CREATE_MACHINE_ID = "1c0641804d"
+CREATE_BASE_IMAGE_UUID = "base-image-ee43618uo7"
+CREATE_PRIVATE_IMAGE_UUID = "image-abcd1234"
+CREATE_INSTANCE_UUID = "1c0641804d-de35343b"
+
+CREATE_RECORD = {
+    "instance_uuid": CREATE_INSTANCE_UUID,
+    "machine_id": CREATE_MACHINE_ID,
+    "gpu_amount": 2,
+    "charge_type": "payg",
+    "base_image_uuid": CREATE_BASE_IMAGE_UUID,
+    "private_image_uuid": "",
+    "instance_name": "trainer",
+    "expand_data_disk": 50,
+}
+
+
+def test_create_forwards_explicit_machine_and_options(home: Path, monkeypatch) -> None:
+    """Every option reaches ``create_instance`` and JSON is passed through."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_create_instance(client, **kwargs):
+        captured.update(kwargs)
+        return CREATE_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "create_instance", fake_create_instance)
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "select_machine",
+        lambda *args, **kwargs: pytest.fail("no machine resolution is needed with --machine-id"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "create",
+            "--machine-id",
+            f" {CREATE_MACHINE_ID} ",
+            "--image",
+            CREATE_BASE_IMAGE_UUID,
+            "--gpu-num",
+            "2",
+            "--name",
+            "trainer",
+            "--data-disk",
+            "50",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "machine_id": CREATE_MACHINE_ID,
+        "base_image_uuid": CREATE_BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "gpu_amount": 2,
+        "instance_name": "trainer",
+        "expand_data_disk": 50,
+    }
+    assert json.loads(result.output) == CREATE_RECORD
+    assert TOKEN not in result.output
+
+
+def test_create_resolves_region_and_gpu_to_a_machine(home: Path, monkeypatch) -> None:
+    """``--region``/``--gpu`` call ``select_machine`` before ordering."""
+    _seed_token()
+    selected: dict[str, object] = {}
+    captured: dict[str, object] = {}
+
+    def fake_select_machine(client, *, region, gpu, gpu_amount):
+        selected.update(region=region, gpu=gpu, gpu_amount=gpu_amount)
+        return {"machine_id": CREATE_MACHINE_ID, "gpu_name": gpu, "gpu_idle_num": 8}
+
+    def fake_create_instance(client, **kwargs):
+        captured.update(kwargs)
+        return CREATE_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "select_machine", fake_select_machine)
+    monkeypatch.setattr(instance_commands.instance_handler, "create_instance", fake_create_instance)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "create",
+            "--region",
+            "nm-B2",
+            "--gpu",
+            "RTX 3090",
+            "--private-image",
+            CREATE_PRIVATE_IMAGE_UUID,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert selected == {"region": "nm-B2", "gpu": "RTX 3090", "gpu_amount": 1}
+    assert captured["machine_id"] == CREATE_MACHINE_ID
+    assert captured["base_image_uuid"] == ""
+    assert captured["private_image_uuid"] == CREATE_PRIVATE_IMAGE_UUID
+    assert captured["gpu_amount"] == 1
+
+
+def test_create_human_output_reports_order(home: Path, monkeypatch) -> None:
+    """The human view names the new instance and its machine, then hints at status."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "create_instance",
+        lambda client, **kwargs: CREATE_RECORD,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "create", "--machine-id", CREATE_MACHINE_ID, "--image", CREATE_BASE_IMAGE_UUID],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"Instance {CREATE_INSTANCE_UUID} ordered on machine {CREATE_MACHINE_ID}." in result.output
+    assert "Check its status with `autodl instance list`." in result.output
+    assert TOKEN not in result.output
+
+
+def test_create_rejects_machine_id_with_region_or_gpu(home: Path, monkeypatch) -> None:
+    """Mixing the two selection modes is a clean usage error."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "create_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run for mixed selection options"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "instance",
+            "create",
+            "--machine-id",
+            CREATE_MACHINE_ID,
+            "--region",
+            "nm-B2",
+            "--image",
+            CREATE_BASE_IMAGE_UUID,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Use either --machine-id or --region/--gpu, not both." in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        [],
+        ["--region", "nm-B2"],
+        ["--gpu", "RTX 3090"],
+    ],
+)
+def test_create_requires_a_complete_selection(home: Path, monkeypatch, selection: list[str]) -> None:
+    """Without a machine ID, both ``--region`` and ``--gpu`` are required."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "create_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a complete selection"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "create", *selection, "--image", CREATE_BASE_IMAGE_UUID],
+    )
+
+    assert result.exit_code == 1
+    assert "Pass --machine-id, or both --region and --gpu." in result.output
+    assert "Traceback" not in result.output
+
+
+def test_create_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "create_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "create", "--machine-id", CREATE_MACHINE_ID, "--image", CREATE_BASE_IMAGE_UUID],
+    )
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_create_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_create_instance(client, **kwargs):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "create_instance", failing_create_instance)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "create", "--machine-id", CREATE_MACHINE_ID, "--image", CREATE_BASE_IMAGE_UUID],
+    )
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_create_value_error_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """A validation error from the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_create_instance(client, **kwargs):
+        raise ValueError("exactly one of base_image_uuid and private_image_uuid must be set")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "create_instance", failing_create_instance)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "create", "--machine-id", CREATE_MACHINE_ID],
+    )
+
+    assert result.exit_code == 1
+    assert "exactly one of base_image_uuid and private_image_uuid must be set" in result.output
+    assert "Traceback" not in result.output

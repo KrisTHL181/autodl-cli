@@ -3,7 +3,10 @@
 ``list`` is implemented against ``POST /api/v1/instance``; its ``--query``
 filter is applied locally because the API has no keyword field. ``detail``
 reads one instance's configuration snapshot from
-``GET /api/v1/instance/snapshot``. ``power-on`` and ``power-off`` post to
+``GET /api/v1/instance/snapshot``. ``create`` posts the web console's
+pay-as-you-go order body to ``POST /api/v1/order/instance/create/payg`` and
+can resolve a machine from ``--region``/``--gpu`` first. ``power-on`` and
+``power-off`` post to
 ``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
 which report success with a null ``data`` payload. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
@@ -281,6 +284,115 @@ def save_image_command(
         return
 
     output.success(f"Save requested for instance {result['instance_uuid']} as image {result['image_name']!r}.")
+
+
+@instance.command("create", help="Order a pay-as-you-go instance.")
+@click.option(
+    "--machine-id",
+    "-m",
+    default="",
+    help="Order on this machine ID (from `autodl gpu machines`).",
+)
+@click.option(
+    "--region",
+    "-r",
+    default="",
+    help="Resolve a machine in this region (needs --gpu).",
+)
+@click.option(
+    "--gpu",
+    "-g",
+    default="",
+    help="GPU model to require when resolving a machine (needs --region).",
+)
+@click.option(
+    "--image",
+    "-i",
+    "base_image_uuid",
+    default="",
+    help="Base-image UUID from `autodl image list`.",
+)
+@click.option(
+    "--private-image",
+    "private_image_uuid",
+    default="",
+    help="Private-image UUID from `autodl image list-private`.",
+)
+@click.option("--gpu-num", type=click.IntRange(min=1), default=1, show_default=True, help="Number of GPUs to request.")
+@click.option("--name", "-n", default="", help="Instance name.")
+@click.option(
+    "--data-disk",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Extra data-disk size in GB.",
+)
+@click.pass_context
+def create_command(
+    ctx: click.Context,
+    machine_id: str,
+    region: str,
+    gpu: str,
+    base_image_uuid: str,
+    private_image_uuid: str,
+    gpu_num: int,
+    name: str,
+    data_disk: int,
+) -> None:
+    """Order a pay-as-you-go instance.
+
+    Pass either ``--machine-id`` or both ``--region`` and ``--gpu``. In the
+    latter case the first machine in that region with enough idle GPUs of the
+    requested model is ordered on. Exactly one of ``--image`` and
+    ``--private-image`` must be set. The command does not ask for
+    confirmation: AutoDL returns the new instance UUID immediately, and the
+    instance may take a moment to appear in ``instance list``.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param machine_id: Machine to order on; blank means resolve one.
+    :param region: Region identifier used to resolve a machine.
+    :param gpu: GPU model used to resolve a machine.
+    :param base_image_uuid: Base-image UUID to boot from.
+    :param private_image_uuid: Private-image UUID to boot from.
+    :param gpu_num: Number of GPUs to request.
+    :param name: Optional instance name.
+    :param data_disk: Extra data-disk size in GB.
+    :raises click.ClickException: When the selection options are inconsistent,
+        an argument is invalid, no token is configured, or the API call fails.
+    """
+    if machine_id.strip() and (region.strip() or gpu.strip()):
+        raise click.ClickException("Use either --machine-id or --region/--gpu, not both.")
+    if not machine_id.strip() and not (region.strip() and gpu.strip()):
+        raise click.ClickException("Pass --machine-id, or both --region and --gpu.")
+
+    token = require_token(load_config())
+
+    try:
+        with AutoDLClient(token) as client:
+            resolved_machine_id = machine_id.strip()
+            if not resolved_machine_id:
+                machine = instance_handler.select_machine(client, region=region, gpu=gpu, gpu_amount=gpu_num)
+                resolved_machine_id = str(machine["machine_id"])
+            result = instance_handler.create_instance(
+                client,
+                machine_id=resolved_machine_id,
+                base_image_uuid=base_image_uuid,
+                private_image_uuid=private_image_uuid,
+                gpu_amount=gpu_num,
+                instance_name=name,
+                expand_data_disk=data_disk,
+            )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Instance {result['instance_uuid']} ordered on machine {result['machine_id']}.")
+    output.info("Check its status with `autodl instance list`.")
 
 
 def register_instance(main_group: click.Group) -> click.Group:

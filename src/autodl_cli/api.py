@@ -3,8 +3,8 @@
 Code that consumes autodl-cli as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
 handler surface for password login, browser-token lookup, account balance,
-instance listing/details, instance lifecycle actions, and the base-image
-catalogue, and normalises internal exceptions into the
+instance listing/details, instance creation and lifecycle actions, and the
+base-image catalogue, and normalises internal exceptions into the
 :class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AutoDLClient",
+    "create_instance",
     "delete_private_image",
     "get_balance",
     "get_current_user",
@@ -213,6 +214,52 @@ def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.get_instance(client, instance_uuid)
+
+
+def create_instance(
+    token: str,
+    *,
+    machine_id: str,
+    base_image_uuid: str = "",
+    private_image_uuid: str = "",
+    gpu_amount: int = 1,
+    instance_name: str = "",
+    expand_data_disk: int = 0,
+) -> dict[str, object]:
+    """Order a pay-as-you-go instance on one machine.
+
+    Exactly one of ``base_image_uuid`` and ``private_image_uuid`` must be set.
+    AutoDL accepts the order immediately and returns the new instance UUID; the
+    instance may take a moment to appear in :func:`list_instances`. This wrapper
+    orders on a known machine only; resolving a region and GPU model to a
+    machine is a CLI concern and is not part of the public API.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param machine_id: Machine to order on, as reported by the machine listing.
+    :param base_image_uuid: Base-image UUID from :func:`list_images`.
+    :param private_image_uuid: Private-image UUID from
+        :func:`list_private_images`.
+    :param gpu_amount: Number of GPUs to request; must be at least 1.
+    :param instance_name: Optional instance name.
+    :param expand_data_disk: Extra data-disk size in GB; must not be negative.
+    :returns: A mapping with ``instance_uuid``, ``machine_id``, ``gpu_amount``,
+        ``charge_type``, ``base_image_uuid``, ``private_image_uuid``,
+        ``instance_name``, and ``expand_data_disk``.
+    :raises ValueError: When ``machine_id`` is blank, ``gpu_amount`` is below 1,
+        ``expand_data_disk`` is negative, or not exactly one image UUID is set.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.create_instance(
+            client,
+            machine_id=machine_id,
+            base_image_uuid=base_image_uuid,
+            private_image_uuid=private_image_uuid,
+            gpu_amount=gpu_amount,
+            instance_name=instance_name,
+            expand_data_disk=expand_data_disk,
+        )
 
 
 def power_on(token: str, instance_uuid: str) -> dict[str, object]:
