@@ -3,10 +3,11 @@
 ``list`` is implemented against ``POST /api/v1/instance``; its ``--query``
 filter is applied locally because the API has no keyword field. ``detail``
 reads one instance's configuration snapshot from
-``GET /api/v1/instance/snapshot``. ``power-off`` posts to
-``POST /api/v1/instance/power_off``, which reports success with a null ``data``
-payload as well. ``save-image`` posts to ``POST /api/v1/instance/image/save``.
-The remaining lifecycle commands wait for their handlers.
+``GET /api/v1/instance/snapshot``. ``power-on`` and ``power-off`` post to
+``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
+which report success with a null ``data`` payload. ``save-image`` posts to
+``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
+their handlers.
 """
 
 from __future__ import annotations
@@ -131,6 +132,37 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.render_instance_detail(detail, instance_uuid=instance_uuid)
+
+
+@instance.command("power-on", help="Power an instance on.")
+@click.argument("instance_uuid")
+@click.pass_context
+def power_on_command(ctx: click.Context, instance_uuid: str) -> None:
+    """Power an instance on.
+
+    AutoDL accepts the request immediately; the instance may take a moment to
+    start before it appears as running in ``instance list``.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :raises click.ClickException: When the argument is blank, no token is
+        configured, or the API call fails.
+    """
+    token = require_token(load_config())
+
+    try:
+        with AutoDLClient(token) as client:
+            result = instance_handler.power_on(client, instance_uuid)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Power-on requested for instance {result['instance_uuid']}.")
 
 
 @instance.command("power-off", help="Power an instance off.")

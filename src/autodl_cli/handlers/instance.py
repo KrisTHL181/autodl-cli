@@ -15,6 +15,10 @@ Saving an instance as a custom image posts to
 ``"data": null``, so :func:`save_image` validates only the envelope and returns
 a small record of what it requested.
 
+Powering an instance on posts to ``POST /api/v1/instance/power_on`` with the
+same ``{"instance_uuid": ...}`` body. It answers with ``"data": null`` too, so
+:func:`power_on` validates the envelope only and returns the matching record.
+
 Powering an instance off posts to ``POST /api/v1/instance/power_off`` with the
 instance UUID in the body. It answers with ``"data": null`` as well, so
 :func:`power_off` follows the same envelope-only validation and record shape.
@@ -45,6 +49,9 @@ INSTANCE_DETAIL_PATH = "/api/v1/instance/snapshot"
 
 #: Path of the save-as-custom-image endpoint.
 INSTANCE_IMAGE_SAVE_PATH = "/api/v1/instance/image/save"
+
+#: Path of the power-on endpoint.
+INSTANCE_POWER_ON_PATH = "/api/v1/instance/power_on"
 
 #: Path of the power-off endpoint.
 INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
@@ -245,11 +252,29 @@ def create_instance(client: AutoDLClient, options: dict[str, object]) -> dict[st
 def power_on(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     """Power an instance on.
 
+    ``POST /api/v1/instance/power_on`` answers with ``"data": null`` on
+    success, so success is signalled by the envelope's ``code`` alone. The
+    request is accepted immediately; the instance may take a moment to start.
+
     :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
-    :returns: The operation result.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``powered_on``.
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
     """
-    ...
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    body: dict[str, object] = {"instance_uuid": instance_uuid}
+    payload = client.request("POST", INSTANCE_POWER_ON_PATH, json=body)
+    require_success_any(payload, action="power on instance")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "powered_on": True,
+    }
 
 
 def power_off(client: AutoDLClient, instance_id: str) -> dict[str, object]:

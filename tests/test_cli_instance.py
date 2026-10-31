@@ -684,3 +684,86 @@ def test_power_off_api_failure_is_a_clean_click_exception(home: Path, monkeypatc
     assert result.exit_code == 1
     assert "token expired" in result.output
     assert "Traceback" not in result.output
+
+
+def test_power_on_forwards_instance_and_returns_json(home: Path, monkeypatch) -> None:
+    """The positional UUID reaches the handler; JSON is passed through."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {"instance_uuid": INSTANCE_UUID, "powered_on": True}
+
+    def fake_power_on(client, instance_id):
+        captured["instance_id"] = instance_id
+        return record
+
+    monkeypatch.setattr(instance_commands.instance_handler, "power_on", fake_power_on)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "power-on", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_power_on_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms which instance was asked to power on."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda client, instance_id: {"instance_uuid": instance_id, "powered_on": True},
+    )
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert f"Power-on requested for instance {INSTANCE_UUID}." in result.output
+    assert TOKEN not in result.output
+
+
+def test_power_on_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> None:
+    """A blank UUID rejected by the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_power_on(client, instance_id):
+        raise ValueError("instance_id must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "power_on", failing_power_on)
+
+    result = CliRunner().invoke(main, ["instance", "power-on", " "])
+
+    assert result.exit_code == 1
+    assert "instance_id must not be empty" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_power_on_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_power_on_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_power_on(client, instance_id):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "power_on", failing_power_on)
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output

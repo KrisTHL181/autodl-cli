@@ -32,6 +32,7 @@ __all__ = [
     "list_private_images",
     "login",
     "power_off",
+    "power_on",
     "save_image",
 ]
 
@@ -211,6 +212,22 @@ def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.get_instance(client, instance_uuid)
+
+
+def power_on(token: str, instance_uuid: str) -> dict[str, object]:
+    """Power an instance on.
+
+    AutoDL accepts the request immediately and answers with a null ``data``
+    payload; the instance may take a moment to start.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``powered_on``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.power_on(client, instance_uuid)
 
 
 def power_off(token: str, instance_uuid: str) -> dict[str, object]:

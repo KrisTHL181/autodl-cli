@@ -147,14 +147,17 @@ autodl instance list
 autodl instance list --status running -q 4090
 autodl instance list --unbind-sub-user
 autodl instance detail <instance-uuid>
+autodl instance power-on <instance-uuid>
 autodl instance power-off <instance-uuid>
 autodl instance save-image <instance-uuid> my-image
 autodl instance save-image <instance-uuid> my-image --try-again
 ```
 
-`power-off` posts to `/api/v1/instance/power_off` and keeps the data disk;
-AutoDL releases a powered-off instance after the retention window shown by
-`instance list` unless it is powered on again. `save-image` posts to
+`power-on` posts to `/api/v1/instance/power_on`; AutoDL accepts the request
+immediately, and the instance may take a moment to show as running. `power-off`
+posts to `/api/v1/instance/power_off` and keeps the data disk; AutoDL releases
+a powered-off instance after the retention window shown by `instance list`
+unless it is powered on again. `save-image` posts to
 `/api/v1/instance/image/save`; AutoDL accepts the request immediately, and the
 image appears under the account's private images once the save finishes.
 
@@ -345,7 +348,7 @@ The codebase is laid out for extensibility:
 - **New MCP tool?** Nothing to do — typed tools are generated from the Click tree.
 
 `nfs` and `config` command groups, the image create options, and the rest of
-the instance lifecycle (create, power on/off, release) are not implemented yet;
+the rest of the instance lifecycle (create, release) is not implemented yet;
 their modules exist as placeholders.
 
 Run the formatter before submitting:
