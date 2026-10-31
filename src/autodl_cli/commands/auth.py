@@ -16,8 +16,8 @@ from collections.abc import Mapping
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.config import config_path, load_config, save_config
+from autodl_cli.commands._helpers import build_client
+from autodl_cli.config import config_path, get_phone_area, load_config, save_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import auth as auth_handler
 
@@ -254,18 +254,17 @@ def auth() -> None:
 @click.option("--phone", prompt="Phone", help="Phone number registered with AutoDL.")
 @click.option(
     "--phone-area",
-    default="+86",
-    show_default=True,
-    help="Phone area prefix.",
+    default=None,
+    help="Phone area prefix (default: the configured phone area).",
 )
 @click.password_option(envvar="AUTODL_PASSWORD", prompt="Password", confirmation_prompt=False)
 @click.pass_context
-def login(ctx: click.Context, phone: str, phone_area: str, password: str) -> None:
+def login(ctx: click.Context, phone: str, phone_area: str | None, password: str) -> None:
     """Log in and save the resulting token in the local config.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param phone: Phone number registered with AutoDL.
-    :param phone_area: Phone area prefix.
+    :param phone_area: Phone area prefix; falls back to the configured value.
     :param password: Plaintext password, read from ``AUTODL_PASSWORD`` when
         the option is omitted.
     :raises click.ClickException: When no fingerprint is stored or the API
@@ -273,9 +272,10 @@ def login(ctx: click.Context, phone: str, phone_area: str, password: str) -> Non
     """
     config = load_config()
     fingerprint = _resolve_fingerprint(config)
+    phone_area = phone_area or get_phone_area(config)
 
     try:
-        with AutoDLClient(None) as client:
+        with build_client(None, config) as client:
             result = auth_handler.login(
                 client,
                 phone,
@@ -349,15 +349,15 @@ def paste(ctx: click.Context, no_verify: bool) -> None:
     if not credentials:
         raise click.ClickException(f"No credentials found. {_ACCEPTED_SHAPES}")
 
+    config = load_config()
     user: dict[str, object] | None = None
     if token and not no_verify:
         try:
-            with AutoDLClient(token) as client:
+            with build_client(token, config) as client:
                 user = auth_handler.get_current_user(client)
         except AutoDLError as exc:
             raise click.ClickException(f"Token verification failed: {exc}") from exc
 
-    config = load_config()
     if token:
         config["token"] = token
     if fingerprint:

@@ -12,8 +12,7 @@ from __future__ import annotations
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.commands._helpers import require_token
+from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import gpu as gpu_handler
@@ -57,11 +56,12 @@ def list_command(
     :raises click.ClickException: When an identifier is unknown, no token is
         configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             regions = gpu_handler.list_regions(client)
             if not region_values:
                 if as_json:
@@ -126,11 +126,12 @@ def find_command(
     :raises click.ClickException: When an identifier is unknown, the model is
         empty, no token is configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             regions = gpu_handler.list_regions(client)
             if region_values:
                 try:
@@ -304,11 +305,12 @@ def machines_command(
     if fetch_all and page_index != 1:
         raise click.UsageError("--page cannot be combined with --all")
 
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             signs: list[str] = []
             if region_values:
                 regions = gpu_handler.list_regions(client)

@@ -10,8 +10,7 @@ from __future__ import annotations
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.commands._helpers import require_token
+from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import account as account_handler
@@ -38,10 +37,11 @@ def balance(ctx: click.Context, charge_type: str) -> None:
     :raises click.ClickException: When no token is configured or the API call
         fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = account_handler.get_balance(client, charge_type=charge_type)
     except AutoDLError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -62,10 +62,11 @@ def me(ctx: click.Context) -> None:
     :raises click.ClickException: When no token is configured or the API call
         fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = account_handler.get_me(client)
     except AutoDLError as exc:
         raise click.ClickException(str(exc)) from exc

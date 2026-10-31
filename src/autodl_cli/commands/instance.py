@@ -20,8 +20,7 @@ from __future__ import annotations
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.commands._helpers import require_token
+from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import instance as instance_handler
@@ -86,10 +85,11 @@ def list_command(
     :raises click.ClickException: When no token is configured or the API call
         fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             instances = instance_handler.list_instances(
                 client,
                 page_size=page_size,
@@ -124,10 +124,11 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
     :raises click.ClickException: When no token is configured or the API call
         fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             detail = instance_handler.get_instance(client, instance_uuid)
     except AutoDLError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -153,10 +154,11 @@ def power_on_command(ctx: click.Context, instance_uuid: str) -> None:
     :raises click.ClickException: When the argument is blank, no token is
         configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = instance_handler.power_on(client, instance_uuid)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -184,10 +186,11 @@ def power_off_command(ctx: click.Context, instance_uuid: str) -> None:
     :raises click.ClickException: When the argument is blank, no token is
         configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = instance_handler.power_off(client, instance_uuid)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -219,7 +222,8 @@ def release_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
         configured, or the API call fails.
     :raises click.Abort: When the user declines the confirmation prompt.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     if not yes:
         click.confirm(
             f"Release instance {instance_uuid}? This deletes it and its data disk.",
@@ -227,7 +231,7 @@ def release_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
         )
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = instance_handler.release_instance(client, instance_uuid)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -264,10 +268,11 @@ def save_image_command(
     :raises click.ClickException: When an argument is blank, no token is
         configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = instance_handler.save_image(
                 client,
                 instance_uuid,
@@ -365,10 +370,11 @@ def create_command(
     if not machine_id.strip() and not (region.strip() and gpu.strip()):
         raise click.ClickException("Pass --machine-id, or both --region and --gpu.")
 
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             resolved_machine_id = machine_id.strip()
             if not resolved_machine_id:
                 machine = instance_handler.select_machine(client, region=region, gpu=gpu, gpu_amount=gpu_num)

@@ -168,6 +168,27 @@ def test_login_prompts_for_password_once(home: Path, monkeypatch) -> None:
     assert captured["password"] == PASSWORD
 
 
+def test_login_uses_configured_phone_area_when_option_omitted(home: Path, monkeypatch) -> None:
+    """A stored ``phone_area`` supplies the prefix when ``--phone-area`` is absent."""
+    config_module.save_config({"device_fingerprint": STORED_FINGERPRINT, "phone_area": "+1"})
+    captured: dict[str, object] = {}
+
+    def fake_login(client, phone, password, *, phone_area, device_fingerprint):
+        captured["phone_area"] = phone_area
+        return {"token": TOKEN, "user": USER, "device_fingerprint": device_fingerprint}
+
+    monkeypatch.setattr(auth_commands.auth_handler, "login", fake_login)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "auth", "login", "--phone", PHONE, "--password", PASSWORD],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["phone_area"] == "+1"
+    assert config_module.load_config()["phone_area"] == "+1"
+
+
 def test_login_without_fingerprint_explains_paste(home: Path, monkeypatch) -> None:
     """Password login refuses to generate a random fingerprint or call the API."""
 
@@ -177,7 +198,7 @@ def test_login_without_fingerprint_explains_paste(home: Path, monkeypatch) -> No
     def fail_login(*args, **kwargs):
         raise AssertionError("the login handler must not run without a fingerprint")
 
-    monkeypatch.setattr(auth_commands, "AutoDLClient", fail_client)
+    monkeypatch.setattr(auth_commands, "build_client", fail_client)
     monkeypatch.setattr(auth_commands.auth_handler, "login", fail_login)
 
     result = CliRunner().invoke(

@@ -24,6 +24,9 @@ DEFAULT_BASE_URL = "https://www.autodl.com"
 #: Value of the ``AppVersion`` header required by every API call.
 APP_VERSION = "v6.53.0"
 
+#: Per-request timeout in seconds used unless the caller overrides it.
+DEFAULT_TIMEOUT = 30.0
+
 #: Maximum number of response-body characters included in an error message.
 _SNIPPET_LIMIT = 200
 
@@ -78,7 +81,8 @@ class AutoDLClient:
         token: str | None = None,
         *,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_TIMEOUT,
+        app_version: str = APP_VERSION,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         """Create a client.
@@ -87,11 +91,13 @@ class AutoDLClient:
             ``Authorization`` header.
         :param base_url: API root; a trailing slash is stripped.
         :param timeout: Per-request timeout in seconds.
+        :param app_version: Value sent in the ``AppVersion`` header.
         :param transport: Optional httpx transport, used by offline tests to
             inject :class:`httpx.MockTransport`.
         """
         self._token = token or ""
         self.base_url = base_url.rstrip("/")
+        self.app_version = app_version
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=timeout,
@@ -117,7 +123,7 @@ class AutoDLClient:
         """
         headers = {"Accept": "application/json"}
         if app_version:
-            headers["AppVersion"] = APP_VERSION
+            headers["AppVersion"] = self.app_version
         if include_auth and self._token:
             headers["Authorization"] = self._token
         if extra:

@@ -7,7 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from autodl_cli.config import config_path, load_config, save_config
+from autodl_cli.client import APP_VERSION, DEFAULT_BASE_URL, DEFAULT_TIMEOUT
+from autodl_cli.config import (
+    DEFAULT_PHONE_AREA,
+    config_path,
+    get_app_version,
+    get_base_url,
+    get_device_fingerprint,
+    get_phone_area,
+    get_timeout,
+    get_token,
+    load_config,
+    save_config,
+    set_app_version,
+    set_base_url,
+    set_device_fingerprint,
+    set_phone_area,
+    set_timeout,
+    set_token,
+)
 
 #: Fingerprint-shaped value used to make round-trip failures obvious.
 _FINGERPRINT = "0123456789abcdef0123456789abcdef"
@@ -67,3 +85,73 @@ def test_save_preserves_unrelated_keys(home: Path) -> None:
     loaded = load_config()
     assert loaded["token"] == "second"
     assert loaded["default_region"] == "west-b"
+
+
+def test_getters_fall_back_to_defaults(home: Path) -> None:
+    """An empty config yields the documented defaults for every optional key."""
+    assert get_token() is None
+    assert get_device_fingerprint() is None
+    assert get_phone_area() == DEFAULT_PHONE_AREA
+    assert get_base_url() == DEFAULT_BASE_URL
+    assert get_timeout() == DEFAULT_TIMEOUT
+    assert get_app_version() == APP_VERSION
+
+
+def test_setters_roundtrip_and_normalise(home: Path) -> None:
+    """Setters persist values and apply their documented normalisation."""
+    set_token("token-value")
+    set_device_fingerprint(_FINGERPRINT.upper())
+    set_phone_area("+1")
+    set_base_url("https://mirror.example.com/")
+    set_timeout(5)
+    set_app_version("v9.99.0")
+
+    assert get_token() == "token-value"
+    assert get_device_fingerprint() == _FINGERPRINT
+    assert get_phone_area() == "+1"
+    assert get_base_url() == "https://mirror.example.com"
+    assert get_timeout() == 5.0
+    assert get_app_version() == "v9.99.0"
+
+
+@pytest.mark.parametrize(
+    ("setter", "value"),
+    [
+        (set_token, "   "),
+        (set_device_fingerprint, "not-a-fingerprint"),
+        (set_phone_area, "86"),
+        (set_base_url, "ftp://example.com"),
+        (set_base_url, ""),
+        (set_timeout, 0),
+        (set_timeout, 601),
+        (set_app_version, "6.53.0"),
+    ],
+)
+def test_setters_reject_invalid_values(home: Path, setter, value) -> None:
+    """Invalid values raise ``ValueError`` and leave the file untouched."""
+    with pytest.raises(ValueError):
+        setter(value)
+
+    assert load_config() == {}
+
+
+@pytest.mark.parametrize(
+    ("setter", "getter", "value"),
+    [
+        (set_token, get_token, "token-value"),
+        (set_device_fingerprint, get_device_fingerprint, _FINGERPRINT),
+        (set_phone_area, get_phone_area, "+1"),
+        (set_base_url, get_base_url, "https://mirror.example.com"),
+        (set_timeout, get_timeout, 5),
+        (set_app_version, get_app_version, "v9.99.0"),
+    ],
+)
+def test_none_removes_key(home: Path, setter, getter, value) -> None:
+    """Passing ``None`` deletes the key so the default applies again."""
+    setter(value)
+    assert load_config() != {}
+
+    setter(None)
+
+    assert load_config() == {}
+    assert getter() != value

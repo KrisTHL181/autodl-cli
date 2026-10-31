@@ -13,8 +13,7 @@ from __future__ import annotations
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.commands._helpers import require_token
+from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import image as image_handler
@@ -95,11 +94,12 @@ def list_command(
     :raises click.ClickException: When a filter is empty, no token is
         configured, or the API call fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             images = image_handler.list_images(
                 client,
                 frameworks=framework_values,
@@ -142,11 +142,12 @@ def list_private_command(ctx: click.Context, page_size: int) -> None:
     :raises click.ClickException: When no token is configured or the API call
         fails.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             images = image_handler.list_private_images(client, page_size=page_size)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -178,14 +179,15 @@ def delete_private_command(ctx: click.Context, image_id: int, yes: bool) -> None
         fails.
     :raises click.Abort: When the user declines the confirmation prompt.
     """
-    token = require_token(load_config())
+    config = load_config()
+    token = require_token(config)
     if not yes:
         click.confirm(f"Delete private image {image_id}?", abort=True)
 
     as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
-        with AutoDLClient(token) as client:
+        with build_client(token, config) as client:
             result = image_handler.delete_private_image(client, image_id)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -14,8 +14,7 @@ from pathlib import Path
 import click
 
 from autodl_cli import output
-from autodl_cli.client import AutoDLClient
-from autodl_cli.commands._helpers import require_token
+from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import tools as tools_handler
@@ -181,7 +180,7 @@ def request(
     stored_token = config.get("token")
     token = stored_token if isinstance(stored_token, str) and stored_token else None
 
-    with AutoDLClient(token) as client:
+    with build_client(token, config) as client:
         resolved_url, on_autodl = tools_handler.resolve_url(url, client.base_url)
         include_auth = on_autodl and not no_auth
         if on_autodl and not no_auth and token is None:
