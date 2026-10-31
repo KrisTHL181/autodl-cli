@@ -1238,6 +1238,132 @@ def render_gpu_matches(matches: Sequence[dict[str, object]]) -> None:
     console.print(table)
 
 
+def _format_image_name(image: Mapping[str, object]) -> str:
+    """Join an image's framework name and version.
+
+    :param image: One mapping returned by
+        :func:`autodl_cli.handlers.image.list_images`.
+    :returns: ``"PyTorch 2.12.1"``, or whichever part is present.
+    """
+    framework = _format_value(image.get("framework_name"))
+    version = image.get("framework_version")
+    if isinstance(version, str) and version:
+        return f"{framework} {version}"
+    return framework
+
+
+def _image_name_cell(image: Mapping[str, object]) -> Text:
+    """Build the image cell: framework name and version, plus a desktop marker.
+
+    :param image: One image mapping.
+    :returns: The name in bold, with ``" (desktop)"`` in yellow when the image
+        runs a desktop environment.
+    """
+    text = Text(_format_image_name(image), style=_STYLE_LABEL)
+    if image.get("is_desktop") is True:
+        text.append(" (desktop)", style=_STYLE_WARN)
+    return text
+
+
+#: Image table columns, in display order.
+_IMAGE_HEADERS: tuple[str, ...] = ("Image", "Python", "CUDA", "Chip", "Arch", "UUID")
+
+
+def _image_row(image: Mapping[str, object]) -> tuple[Text, ...]:
+    """Build one row of the wide image table.
+
+    :param image: One mapping returned by
+        :func:`autodl_cli.handlers.image.list_images`.
+    :returns: One styled cell per entry of :data:`_IMAGE_HEADERS`.
+    """
+    return (
+        _image_name_cell(image),
+        _value_cell(image.get("python_version"), _STYLE_COLUMN),
+        _value_cell(image.get("cuda_version"), _STYLE_NUM),
+        _value_cell(image.get("chip_corp"), _STYLE_META),
+        _value_cell(image.get("cpu_arch"), _STYLE_META),
+        _value_cell(image.get("image_uuid"), _STYLE_COLUMN),
+    )
+
+
+def _format_image_details(image: Mapping[str, object]) -> Text:
+    """Build the stacked detail cell used when the wide table cannot fit.
+
+    :param image: One image mapping.
+    :returns: Three styled lines combining every field shown by the wide
+        table.
+    """
+    text = Text()
+    text.append_text(_image_name_cell(image))
+    text.append("\n")
+    text.append("Python ", style=_STYLE_META)
+    text.append(_format_value(image.get("python_version")), style=_STYLE_COLUMN)
+    text.append(" · CUDA ", style=_STYLE_META)
+    text.append(_format_value(image.get("cuda_version")), style=_STYLE_NUM)
+    text.append("\n")
+    text.append(_format_value(image.get("chip_corp")), style=_STYLE_META)
+    text.append(" · ", style=_STYLE_META)
+    text.append(_format_value(image.get("cpu_arch")), style=_STYLE_META)
+    text.append(" · ", style=_STYLE_META)
+    text.append(_format_value(image.get("image_uuid")), style=_STYLE_COLUMN)
+    return text
+
+
+def _render_stacked_images(images: Sequence[dict[str, object]]) -> None:
+    """Render images as a single stacked-details column.
+
+    Used when the terminal is too narrow for the wide table, so no field is
+    silently truncated.
+
+    :param images: Mappings returned by
+        :func:`autodl_cli.handlers.image.list_images`.
+    """
+    table = _table(f"Base images ({len(images)})")
+    table.add_column("Details")
+    for image in images:
+        table.add_row(_format_image_details(image))
+    console.print(table)
+
+
+def render_images(images: Sequence[dict[str, object]]) -> None:
+    """Render the base-image catalogue as a Rich table.
+
+    Each row is one selectable image. The wide table shows the framework and
+    version, Python/OS, CUDA, chip vendor, CPU architecture, and the UUID used
+    when ordering; when it does not fit the terminal, the fields are stacked
+    under the image name instead. ``--json`` callers receive the complete
+    handler result.
+
+    :param images: Mappings returned by
+        :func:`autodl_cli.handlers.image.list_images`.
+    """
+    if not images:
+        console.print("No images found.", style=_STYLE_META)
+        return
+
+    rows = [_image_row(image) for image in images]
+
+    # Rich shrinks columns until their content is ellipsised, so check whether
+    # the natural table width fits before drawing it.
+    content_widths = [
+        max(_text_width(header), *(_text_width(row[index]) for row in rows))
+        for index, header in enumerate(_IMAGE_HEADERS)
+    ]
+    cell_padding = 2  # one space on each side of every cell
+    border_width = 2 + len(_IMAGE_HEADERS) - 1  # table edges plus the inner borders
+    if sum(width + cell_padding for width in content_widths) + border_width > console.width:
+        _render_stacked_images(images)
+        return
+
+    table = _table(f"Base images ({len(images)})")
+    for header in _IMAGE_HEADERS:
+        table.add_column(header, justify="right" if header == "CUDA" else "left")
+    for row in rows:
+        table.add_row(*row)
+
+    console.print(table)
+
+
 def _format_gib(value: object) -> str:
     """Format a byte count for the machine table.
 

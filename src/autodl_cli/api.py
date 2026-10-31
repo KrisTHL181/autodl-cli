@@ -2,9 +2,9 @@
 
 Code that consumes autodl-cli as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
-handler surface for password login, browser-token lookup, account balance, and
-instance listing/details, and normalises internal exceptions into the
-:class:`~autodl_cli.errors.AutoDLError` hierarchy.
+handler surface for password login, browser-token lookup, account balance,
+instance listing/details, and the base-image catalogue, and normalises internal
+exceptions into the :class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from autodl_cli.client import AutoDLClient
 from autodl_cli.handlers import account as account_handler
 from autodl_cli.handlers import auth as auth_handler
+from autodl_cli.handlers import image as image_handler
 from autodl_cli.handlers import instance as instance_handler
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ __all__ = [
     "get_balance",
     "get_current_user",
     "get_instance",
+    "list_images",
     "list_instances",
     "login",
 ]
@@ -68,6 +70,47 @@ def get_balance(token: str, *, charge_type: str = "payg") -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return account_handler.get_balance(client, charge_type=charge_type)
+
+
+def list_images(
+    token: str,
+    *,
+    frameworks: Iterable[str] = (),
+    framework_versions: Iterable[str] = (),
+    python_versions: Iterable[str] = (),
+    cuda_versions: Iterable[str] = (),
+    chip_corps: Iterable[str] = (),
+    cpu_archs: Iterable[str] = (),
+) -> list[dict[str, object]]:
+    """Return the base images available for new instances.
+
+    The API returns a four-level option tree; this function flattens it into
+    one record per selectable image. Filters are case-insensitive substrings,
+    ORed within one argument and ANDed across arguments.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param frameworks: Framework names or fragments to include.
+    :param framework_versions: Framework versions or fragments to include.
+    :param python_versions: Python/OS labels or fragments to include.
+    :param cuda_versions: CUDA versions or fragments to include.
+    :param chip_corps: Chip vendors to include, for example ``nvidia``.
+    :param cpu_archs: CPU architectures to include, for example ``x86``.
+    :returns: One mapping per image with ``framework_name``,
+        ``framework_version``, ``python_version``, ``cuda_version``,
+        ``image_uuid``, ``chip_corp``, ``cpu_arch``, and ``is_desktop``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return image_handler.list_images(
+            client,
+            frameworks=frameworks,
+            framework_versions=framework_versions,
+            python_versions=python_versions,
+            cuda_versions=cuda_versions,
+            chip_corps=chip_corps,
+            cpu_archs=cpu_archs,
+        )
 
 
 def list_instances(
