@@ -1458,7 +1458,7 @@ def _private_created_cell(image: Mapping[str, object]) -> Text:
 
 
 #: Private-image table columns, in display order.
-_PRIVATE_IMAGE_HEADERS: tuple[str, ...] = ("Name", "Status", "Image", "Size", "Created", "UUID")
+_PRIVATE_IMAGE_HEADERS: tuple[str, ...] = ("ID", "Name", "Status", "Image", "Size", "Created", "UUID")
 
 
 def _private_image_row(image: Mapping[str, object]) -> tuple[Text, ...]:
@@ -1469,6 +1469,7 @@ def _private_image_row(image: Mapping[str, object]) -> tuple[Text, ...]:
     :returns: One styled cell per entry of :data:`_PRIVATE_IMAGE_HEADERS`.
     """
     return (
+        _value_cell(image.get("id"), _STYLE_NUM),
         _value_cell(image.get("name"), _STYLE_LABEL),
         _private_status_cell(image),
         _private_spec_cell(image),
@@ -1494,6 +1495,9 @@ def _format_private_image_details(image: Mapping[str, object]) -> Text:
 
     text = Text(_format_value(image.get("name")), style=_STYLE_LABEL)
     text.append("\n")
+    text.append("ID ", style=_STYLE_META)
+    text.append(_format_value(image.get("id")), style=_STYLE_NUM)
+    text.append(" · ", style=_STYLE_META)
     text.append(status, style=_status_style(image.get("status")))
     text.append(" · ", style=_STYLE_META)
     text.append(_format_gib(image.get("image_size")), style=_STYLE_NUM)
@@ -1533,9 +1537,10 @@ def _render_stacked_private_images(images: Sequence[dict[str, object]]) -> None:
 def render_private_images(images: Sequence[dict[str, object]]) -> None:
     """Render the account's private images as a Rich table.
 
-    Each row shows the image name, save status and progress, framework,
-    Python/OS, CUDA version, size, creation time, and UUID. When the table does
-    not fit the terminal, the fields are stacked under the name instead.
+    Each row shows the numeric ID, image name, save status and progress,
+    framework, Python/OS, CUDA version, size, creation time, and UUID. When the
+    table does not fit the terminal, the fields are stacked under the name
+    instead.
     ``--json`` callers receive the API's entries unchanged.
 
     :param images: Mappings returned by
@@ -1561,7 +1566,7 @@ def render_private_images(images: Sequence[dict[str, object]]) -> None:
 
     table = _table(f"Private images ({len(images)})")
     for header in _PRIVATE_IMAGE_HEADERS:
-        table.add_column(header, justify="right" if header == "Size" else "left")
+        table.add_column(header, justify="right" if header in ("ID", "Size") else "left")
     for row in rows:
         table.add_row(*row)
 

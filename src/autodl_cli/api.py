@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AutoDLClient",
+    "delete_private_image",
     "get_balance",
     "get_current_user",
     "get_instance",
@@ -133,6 +134,22 @@ def list_private_images(
     """
     with AutoDLClient(token) as client:
         return image_handler.list_private_images(client, page_size=page_size)
+
+
+def delete_private_image(token: str, image_id: int) -> dict[str, object]:
+    """Delete one of the account's private images.
+
+    ``image_id`` is the numeric ``id`` field from :func:`list_private_images`,
+    not the ``image-uuid`` string. Deletion is irreversible.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param image_id: Numeric private-image ID; must be positive.
+    :returns: A mapping with ``image_id`` and ``deleted``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return image_handler.delete_private_image(client, image_id)
 
 
 def list_instances(

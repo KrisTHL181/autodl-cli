@@ -115,14 +115,23 @@ autodl image list --python 3.12 --chip nvidia
 autodl --json image list --chip mthreads | jq -r '.[].image_uuid'
 ```
 
-`image list-private` shows the images saved from your own instances, with
-their save status and progress, size, framework, creation time, and UUID. Every
-page is fetched, so the listing is complete regardless of AutoDL's page size.
+`image list-private` shows the images saved from your own instances, with the
+numeric ID, save status and progress, size, framework, creation time, and UUID.
+Every page is fetched, so the listing is complete regardless of AutoDL's page
+size.
 
 ```bash
 autodl image list-private
 autodl image list-private --page-size 20
-autodl --json image list-private | jq -r '.[] | [.name, .status] | @tsv'
+autodl --json image list-private | jq -r '.[] | [.id, .name, .status] | @tsv'
+```
+
+Deletion uses that numeric ID and is irreversible, so the command asks for
+confirmation; pass `--yes` in scripts.
+
+```bash
+autodl image delete-private 842525
+autodl image delete-private 842525 --yes
 ```
 
 ### 🖥️ Instances

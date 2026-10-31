@@ -447,3 +447,59 @@ def test_list_private_images_surfaces_an_authentication_failure() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(AuthError, match="login timed out"):
             image_handler.list_private_images(client)
+
+
+def test_delete_private_image_sends_image_id_and_tolerates_null_data() -> None:
+    """The handler DELETEs by numeric ID and accepts a null ``data`` payload."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.delete_private_image(client, 842526)
+
+    assert seen == {
+        "method": "DELETE",
+        "path": "/api/v1/image/private/delete",
+        "authorization": TOKEN,
+        "body": {"image_id": 842526},
+    }
+    assert result == {"image_id": 842526, "deleted": True}
+
+
+@pytest.mark.parametrize("image_id", [0, -1, True, "842526"])
+def test_delete_private_image_rejects_invalid_ids(image_id: object) -> None:
+    """A non-positive or non-integer ID is rejected before any request."""
+    with pytest.raises(ValueError, match="image_id must be a positive integer"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            image_handler.delete_private_image(client, image_id)  # type: ignore[arg-type]
+
+
+def test_delete_private_image_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-9"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            image_handler.delete_private_image(client, 842526)
+
+
+def test_delete_private_image_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "ImageNotFound", "msg": "no such image", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no such image"):
+            image_handler.delete_private_image(client, 842526)

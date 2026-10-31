@@ -4,7 +4,8 @@
 row per selectable base image. Every filter is a case-insensitive substring
 match, so ``--framework torch`` finds PyTorch and ``--cuda 12`` finds every
 12.x toolkit. ``list-private`` shows the images saved from this account's
-instances, reading ``POST /api/v1/image/private/list`` page by page.
+instances, reading ``POST /api/v1/image/private/list`` page by page;
+``delete-private`` removes one by its numeric ID after a confirmation prompt.
 """
 
 from __future__ import annotations
@@ -157,6 +158,45 @@ def list_private_command(ctx: click.Context, page_size: int) -> None:
         return
 
     output.render_private_images(images)
+
+
+@image.command("delete-private", help="Delete one of your private images.")
+@click.argument("image_id", type=click.IntRange(min=1))
+@click.option("--yes", "-y", is_flag=True, help="Delete without asking for confirmation.")
+@click.pass_context
+def delete_private_command(ctx: click.Context, image_id: int, yes: bool) -> None:
+    """Delete one of your private images.
+
+    ``IMAGE_ID`` is the numeric ``ID`` column from ``image list-private``, not
+    the image UUID. Deletion is irreversible, so the command asks for
+    confirmation unless ``--yes`` is passed; use ``--yes`` in scripts.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param image_id: Numeric private-image ID.
+    :param yes: Whether to skip the confirmation prompt.
+    :raises click.ClickException: When no token is configured or the API call
+        fails.
+    :raises click.Abort: When the user declines the confirmation prompt.
+    """
+    token = require_token(load_config())
+    if not yes:
+        click.confirm(f"Delete private image {image_id}?", abort=True)
+
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    try:
+        with AutoDLClient(token) as client:
+            result = image_handler.delete_private_image(client, image_id)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        output.render_json(result)
+        return
+
+    output.success(f"Deleted private image {result['image_id']}.")
 
 
 def register_image(main_group: click.Group) -> click.Group:

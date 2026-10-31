@@ -287,8 +287,9 @@ def test_list_private_human_output_shows_table(home: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Private images (2)" in result.output
-    for header in ("Name", "Status", "Image", "Size", "Created", "UUID"):
+    for header in ("ID", "Name", "Status", "Image", "Size", "Created", "UUID"):
         assert header in result.output
+    assert "842525" in result.output
     assert "save-image-test" in result.output
     assert "finished" in result.output
     assert "1G" in result.output
@@ -316,7 +317,7 @@ def test_list_private_stacks_fields_on_a_narrow_terminal(home: Path, monkeypatch
     assert result.exit_code == 0, result.output
     assert "Details" in result.output
     assert "save-image-test" in result.output
-    assert "finished · 1G · 2026-11-01 02:46:47" in result.output
+    assert "ID 842525 · finished · 1G · 2026-11-01 02:46:47" in result.output
     assert "PyTorch 2.12.1 · 3.12(ubuntu22.04) · CUDA 13.0" in result.output
     assert "image-40c7c7115c" in result.output
     assert "saving · 42%" in result.output
@@ -386,6 +387,116 @@ def test_list_private_api_failure_is_a_clean_click_exception(home: Path, monkeyp
     monkeypatch.setattr(image_commands.image_handler, "list_private_images", failing_list_private_images)
 
     result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_delete_private_forwards_id_and_returns_json(home: Path, monkeypatch) -> None:
+    """``--yes`` skips the prompt, forwards the ID, and emits the result."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_delete_private_image(client, image_id):
+        captured["image_id"] = image_id
+        return {"image_id": image_id, "deleted": True}
+
+    monkeypatch.setattr(image_commands.image_handler, "delete_private_image", fake_delete_private_image)
+
+    result = CliRunner().invoke(main, ["--json", "image", "delete-private", "842525", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"image_id": 842525}
+    assert json.loads(result.output) == {"image_id": 842525, "deleted": True}
+    assert TOKEN not in result.output
+
+
+def test_delete_private_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms the deleted ID."""
+    _seed_token()
+
+    def fake_delete_private_image(client, image_id):
+        return {"image_id": image_id, "deleted": True}
+
+    monkeypatch.setattr(image_commands.image_handler, "delete_private_image", fake_delete_private_image)
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "842525", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "Deleted private image 842525." in result.output
+    assert TOKEN not in result.output
+
+
+def test_delete_private_prompts_and_accepts(home: Path, monkeypatch) -> None:
+    """Without ``--yes`` the command asks, then deletes when confirmed."""
+    _seed_token()
+    called: list[int] = []
+
+    def fake_delete_private_image(client, image_id):
+        called.append(image_id)
+        return {"image_id": image_id, "deleted": True}
+
+    monkeypatch.setattr(image_commands.image_handler, "delete_private_image", fake_delete_private_image)
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "842525"], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Delete private image 842525?" in result.output
+    assert called == [842525]
+
+
+def test_delete_private_prompt_can_abort(home: Path, monkeypatch) -> None:
+    """Declining the prompt aborts without calling the handler."""
+    _seed_token()
+    monkeypatch.setattr(
+        image_commands.image_handler,
+        "delete_private_image",
+        lambda *args, **kwargs: pytest.fail("the handler must not run when the prompt is declined"),
+    )
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "842525"], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_delete_private_rejects_a_non_positive_id(home: Path) -> None:
+    """Click rejects an ID below one before the handler runs."""
+    _seed_token()
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "0", "--yes"])
+
+    assert result.exit_code == 2
+    assert "Invalid value" in result.output
+
+
+def test_delete_private_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        image_commands.image_handler,
+        "delete_private_image",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "842525", "--yes"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_delete_private_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_delete_private_image(client, image_id):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(image_commands.image_handler, "delete_private_image", failing_delete_private_image)
+
+    result = CliRunner().invoke(main, ["image", "delete-private", "842525", "--yes"])
 
     assert result.exit_code == 1
     assert "token expired" in result.output

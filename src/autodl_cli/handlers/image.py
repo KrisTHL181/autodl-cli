@@ -9,6 +9,9 @@ the API reports.
 The account's own saved images live behind
 ``POST /api/v1/image/private/list``, a paged endpoint like the instance list.
 :func:`list_private_images` walks every page and returns the entries unchanged.
+Deleting one uses ``DELETE /api/v1/image/private/delete`` with the numeric
+``image_id`` from that list, not the ``image-uuid`` string; it answers with
+``"data": null``.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
-from autodl_cli.handlers._common import require_success, require_success_list
+from autodl_cli.handlers._common import require_success, require_success_any, require_success_list
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -28,6 +31,9 @@ IMAGE_ALL_PATH = "/api/v1/image/all"
 
 #: Path of the account's private-image list endpoint.
 PRIVATE_IMAGE_LIST_PATH = "/api/v1/image/private/list"
+
+#: Path of the private-image delete endpoint.
+PRIVATE_IMAGE_DELETE_PATH = "/api/v1/image/private/delete"
 
 #: Number of private images requested per API call when the caller does not choose.
 DEFAULT_PRIVATE_PAGE_SIZE = 100
@@ -309,6 +315,29 @@ def list_private_images(
             break
         page_index += 1
     return images
+
+
+def delete_private_image(client: AutoDLClient, image_id: int) -> dict[str, object]:
+    """Delete one private image.
+
+    The console deletes by the numeric ``id`` field of the private-image list,
+    not by the ``image-uuid`` string. The endpoint answers with
+    ``"data": null`` on success.
+
+    :param client: Authenticated API client.
+    :param image_id: Numeric image ID from :func:`list_private_images`.
+    :returns: A mapping with ``image_id`` and ``deleted``.
+    :raises ValueError: When ``image_id`` is not a positive integer.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    if isinstance(image_id, bool) or not isinstance(image_id, int) or image_id <= 0:
+        raise ValueError("image_id must be a positive integer")
+
+    payload = client.request("DELETE", PRIVATE_IMAGE_DELETE_PATH, json={"image_id": image_id})
+    require_success_any(payload, action="delete private image")
+
+    return {"image_id": image_id, "deleted": True}
 
 
 def get_create_options(client: AutoDLClient) -> dict[str, object]:
