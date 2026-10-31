@@ -9,17 +9,20 @@ plain UTF-8 JSON with no ANSI escapes.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from rich import box
 from rich.cells import cell_len
 from rich.console import Console
+from rich.markup import escape
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeRemainingColumn, TransferSpeedColumn
 from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
 #: Shared console; Rich disables colour automatically when stdout is not a TTY.
 #: Automatic highlighting is off so the explicit palette below is the only
@@ -1818,6 +1821,168 @@ def render_gpu_machines(page: Mapping[str, object]) -> None:
 
     console.print(table)
     _render_machine_page_footer(page)
+
+
+def _format_bytes(value: object) -> str:
+    """Format a byte count for the NFS file listing.
+
+    :param value: Raw byte count from the API.
+    :returns: ``"350 B"``, ``"2.0 KiB"``, ``"1.5 GiB"``, or ``"-"`` when the
+        value is not a non-negative integer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return "-"
+    size = float(value)
+    unit = "B"
+    for next_unit in ("KiB", "MiB", "GiB", "TiB"):
+        if size < 1024:
+            break
+        size /= 1024
+        unit = next_unit
+    return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+
+
+def _format_nfs_time(value: object) -> str:
+    """Format an NFS timestamp, including the API's zero time for directories.
+
+    :param value: Timestamp from the directory listing.
+    :returns: ``YYYY-MM-DD HH:MM:SS`` or ``"-"`` when missing or zero.
+    """
+    if not isinstance(value, str) or not value or value.startswith("0001-"):
+        return "-"
+    return _format_timestamp(value.replace("Z", "+00:00"))
+
+
+def render_nfs_regions(regions: Sequence[dict[str, object]]) -> None:
+    """Render the NFS volumes as a Rich table.
+
+    Each row shows the region name and sign, its status, the export host and
+    port, and the default quota. ``--json`` callers receive the entries
+    unchanged.
+
+    :param regions: Mappings returned by
+        :func:`autodl_cli.handlers.nfs.list_regions`.
+    """
+    if not regions:
+        console.print("No NFS regions found.", style=_STYLE_META)
+        return
+
+    headers = ("Region", "Sign", "Status", "Host", "Quota")
+    table = _table("NFS regions")
+    for header in headers:
+        table.add_column(header, justify="right" if header == "Quota" else "left")
+    for region in regions:
+        status = _format_value(region.get("status"))
+        status_style = _STYLE_OK if status == "created" else _STYLE_WARN if status != "-" else _STYLE_META
+
+        address = region.get("export_addr")
+        port = region.get("port")
+        if isinstance(address, str) and address:
+            host = f"{address}:{port}" if isinstance(port, int) and not isinstance(port, bool) else address
+        else:
+            host = "-"
+
+        table.add_row(
+            _value_cell(region.get("name"), _STYLE_LABEL),
+            _value_cell(region.get("sign"), _STYLE_COLUMN),
+            Text(status, style=status_style),
+            _value_cell(host, _STYLE_META),
+            _value_cell(_format_gib(region.get("default_size")), _STYLE_NUM),
+        )
+    console.print(table)
+
+
+def render_nfs_files(listing: Mapping[str, object]) -> None:
+    """Render one NFS directory as a Rich table.
+
+    Directories are shown with a trailing slash, no size, and no timestamp.
+    ``--json`` callers receive the entries unchanged.
+
+    :param listing: Mapping returned by
+        :func:`autodl_cli.handlers.nfs.list_files`.
+    """
+    region = _format_value(listing.get("region"))
+    path = _format_value(listing.get("dir_path"))
+    raw_entries = listing.get("entries")
+    entries = [entry for entry in raw_entries if isinstance(entry, dict)] if isinstance(raw_entries, list) else []
+
+    if not entries:
+        console.print(f"No files in {path} (region {region}).", style=_STYLE_META, markup=False)
+        return
+
+    table = _table(f"NFS {escape(path)} · {escape(region)}")
+    for header in ("Name", "Size", "Type", "Updated"):
+        table.add_column(header, justify="right" if header == "Size" else "left")
+
+    for entry in entries:
+        is_dir = entry.get("is_dir") is True
+        name = Text(_format_value(entry.get("name")), style=_STYLE_COLUMN if is_dir else _STYLE_LABEL)
+        if is_dir:
+            name.append("/")
+        table.add_row(
+            name,
+            _value_cell("-" if is_dir else _format_bytes(entry.get("size")), _STYLE_NUM),
+            Text("dir" if is_dir else "file", style=_STYLE_META),
+            _value_cell("-" if is_dir else _format_nfs_time(entry.get("updated_at")), _STYLE_META),
+        )
+    console.print(table)
+
+
+def render_nfs_upload(result: Mapping[str, object]) -> None:
+    """Render a successful NFS upload summary.
+
+    :param result: Mapping returned by
+        :func:`autodl_cli.handlers.nfs.upload_file`.
+    """
+    text = Text("Uploaded ", style=_STYLE_OK)
+    text.append(_format_value(result.get("filename")), style=_STYLE_LABEL)
+    text.append(" to ", style=_STYLE_META)
+    text.append(_format_value(result.get("remote_path")), style=_STYLE_COLUMN)
+
+    details = [_format_bytes(result.get("size")), _format_value(result.get("region"))]
+    chunks = result.get("chunks")
+    if isinstance(chunks, int) and not isinstance(chunks, bool) and chunks > 1:
+        details.append(f"{chunks} chunks")
+    text.append(f" ({', '.join(details)})", style=_STYLE_META)
+    console.print(text)
+
+
+@contextmanager
+def upload_progress(filename: str, total: int) -> Iterator[Callable[[int], None]]:
+    """Show a progress bar while a file is uploaded.
+
+    The bar is transient, so a finished upload leaves only the summary line
+    on screen.
+
+    :param filename: File name shown next to the bar.
+    :param total: File size in bytes.
+    :yields: A callback that accepts the number of bytes sent so far.
+    """
+    size = max(total, 1)
+    progress = Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+    task_id = progress.add_task(filename, total=size)
+    progress.start()
+
+    def update(sent: int) -> None:
+        """Advance the bar to *sent* bytes.
+
+        :param sent: Number of bytes sent so far.
+        """
+        completed = size if total <= 0 else min(max(sent, 0), total)
+        progress.update(task_id, completed=completed)
+
+    try:
+        yield update
+    finally:
+        progress.stop()
 
 
 def success(message: str) -> None:

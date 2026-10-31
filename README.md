@@ -7,7 +7,7 @@
 *A typed CLI, a public Python API, and an optional MCP server for AutoDL's web API.*
 
 ```
-account · gpu · image · instance · tools — all from the command line.
+account · gpu · image · instance · nfs · tools — all from the command line.
 ```
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -180,6 +180,29 @@ instance name, and extra data-disk size in GB (default 0). The command returns
 the new instance UUID immediately — the instance may take a moment to appear in
 `instance list` — and does not prompt for confirmation.
 
+### 🗂️ Network Disk (NFS)
+
+AutoDL's network disk is regional: each region has its own volume and its own
+API host. `nfs regions` shows the available signs, hosts, and quota. `nfs ls`
+reads a directory, `nfs rm` deletes a file, and `nfs upload` sends a local file
+in the same 5 MiB chunks the web console uses, so large files work too.
+
+```bash
+autodl nfs regions
+autodl nfs ls / --region bj-B1
+autodl nfs ls /datasets --region bj-B1
+autodl nfs upload ./model.bin --region bj-B1
+autodl nfs upload ./model.bin --region bj-B1 --dir-path /models --filename v2.bin
+autodl nfs rm /models/old.bin --region bj-B1
+autodl nfs rm /models/old.bin --region bj-B1 --yes
+```
+
+`--region` is required because there is no account-wide default volume. Uploads
+hash the first 1 MiB of the file and send that digest with every chunk, matching
+the console; a file larger than 5 MiB is split into ordered multipart chunks,
+with `is_last` set on the final one. `rm` is irreversible and asks for
+confirmation unless `--yes` is passed; it deletes files, not directories.
+
 ### 🛠️ API Debugging
 
 `autodl tools request` is a thin HTTP client for the AutoDL API. It attaches the
@@ -266,16 +289,17 @@ src/autodl_cli/
 │   ├── gpu.py
 │   ├── image.py
 │   ├── instance.py
+│   ├── nfs.py
 │   ├── tools.py
-│   └── config.py · nfs.py   # placeholders
+│   └── config.py
 ├── handlers/              # one module per domain; return plain dicts
 │   ├── auth.py
 │   ├── account.py
 │   ├── gpu.py
 │   ├── image.py
 │   ├── instance.py
-│   ├── tools.py
-│   └── nfs.py             # placeholder
+│   ├── nfs.py
+│   └── tools.py
 ├── utils/wait.py          # jittered sleep helper
 └── mcp/
     ├── generate.py        # AutoDL-specific click2mcp configuration
@@ -364,9 +388,6 @@ The codebase is laid out for extensibility:
 - **New handler?** Add `handlers/<domain>.py`. Return plain dictionaries, never
   print, and go through `AutoDLClient` instead of `httpx`.
 - **New MCP tool?** Nothing to do — typed tools are generated from the Click tree.
-
-The `nfs` and `config` command groups are not implemented yet; their modules
-exist as placeholders.
 
 Run the formatter before submitting:
 
