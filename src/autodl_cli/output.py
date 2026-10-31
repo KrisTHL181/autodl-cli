@@ -9,9 +9,10 @@ plain UTF-8 JSON with no ANSI escapes.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
 
@@ -203,20 +204,30 @@ def render_account(account: dict[str, object]) -> None:
     console.print(table)
 
 
-def _format_instance_gpu(instance: dict[str, object]) -> str:
-    """Describe an instance's GPU allocation.
+def _format_instance_location(instance: dict[str, object]) -> str:
+    """Return ``region / machine`` for an instance.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: The GPU alias with a count when more than one is requested,
-        ``"CPU"`` for a CPU-only instance, or ``"-"``.
+    :returns: The region and machine alias, or whichever one is present.
     """
-    name = instance.get("user_define_gpu_name") or instance.get("snapshot_gpu_alias_name")
-    if not isinstance(name, str) or not name:
-        return "CPU" if instance.get("start_mode") == "non_gpu" else "-"
-    amount = instance.get("req_gpu_amount")
-    if isinstance(amount, int) and not isinstance(amount, bool) and amount > 1:
-        return f"{name} ×{amount}"
-    return name
+    region = _first_text(instance, "region_name", "region_sign")
+    machine = instance.get("machine_alias")
+    if isinstance(machine, str) and machine and region != "-":
+        return f"{region} / {machine}"
+    return region
+
+
+def _format_instance_title(instance: dict[str, object]) -> str:
+    """Build the multi-line identifier cell of the wide table.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: Location, UUID, and name (when set), one per line.
+    """
+    lines = [_format_instance_location(instance), _format_value(instance.get("uuid"))]
+    name = instance.get("name")
+    if isinstance(name, str) and name:
+        lines.append(name)
+    return "\n".join(lines)
 
 
 def _format_instance_status(instance: dict[str, object]) -> str:
@@ -231,6 +242,22 @@ def _format_instance_status(instance: dict[str, object]) -> str:
     if isinstance(sub_status, str) and sub_status:
         return f"{status} ({sub_status})"
     return status
+
+
+def _format_instance_spec(instance: dict[str, object]) -> str:
+    """Describe the GPU allocation as the web console does.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The GPU alias and requested count (``"RTX 3090 ×1"``), ``"CPU"``
+        for a CPU-only instance, or ``"-"``.
+    """
+    name = instance.get("user_define_gpu_name") or instance.get("snapshot_gpu_alias_name")
+    if not isinstance(name, str) or not name:
+        return "CPU" if instance.get("start_mode") == "non_gpu" else "-"
+    amount = instance.get("req_gpu_amount")
+    if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+        return f"{name} ×{amount}"
+    return name
 
 
 def _format_instance_price(instance: dict[str, object]) -> str:
@@ -249,6 +276,139 @@ def _format_instance_price(instance: dict[str, object]) -> str:
     return "-"
 
 
+def _format_instance_billing(instance: dict[str, object]) -> str:
+    """Format the billing mode and price.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The charge type, plus the price on a second line when one is
+        reported.
+    """
+    lines = [_format_value(instance.get("charge_type"))]
+    price = _format_instance_price(instance)
+    if price != "-":
+        lines.append(price)
+    return "\n".join(lines)
+
+
+def _format_instance_disk(instance: dict[str, object]) -> str:
+    """Format system and data disk usage as two lines of percentages.
+
+    The data-disk figures only exist inside ``usage_info``; the system-disk
+    rate is reported directly on the instance.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: ``Sys NN.NN%`` and ``Data NN.NN%`` lines.
+    """
+    system_rate = instance.get("root_fs_used_rate")
+    if isinstance(system_rate, (int, float)) and not isinstance(system_rate, bool):
+        system = f"Sys {system_rate * 100:.2f}%"
+    else:
+        system = "Sys -"
+
+    data = "-"
+    usage = instance.get("usage_info")
+    if isinstance(usage, dict):
+        used = usage.get("data_disk_used_size")
+        total = usage.get("data_disk_total_size")
+        if isinstance(used, int) and isinstance(total, int) and total > 0:
+            data = f"{used / total * 100:.2f}%"
+    return f"{system}\nData {data}"
+
+
+def _format_date(value: object) -> str:
+    """Format an ISO 8601 timestamp as a date.
+
+    :param value: Raw timestamp from the instance response.
+    :returns: ``YYYY-MM-DD``, the untouched string when it does not parse, or
+        ``"-"`` when the value is missing.
+    """
+    if not isinstance(value, str) or not value:
+        return "-"
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d")
+    except ValueError:
+        return value
+
+
+#: How long AutoDL keeps a powered-off instance before releasing it. The web
+#: console counts down from ``status_at + SHUTDOWN_RETENTION``.
+SHUTDOWN_RETENTION = timedelta(days=15)
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    """Parse an ISO 8601 timestamp.
+
+    :param value: Raw timestamp from the instance response.
+    :returns: The parsed datetime, or ``None`` when missing or invalid.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _current_time() -> datetime:
+    """Return the current local time.
+
+    Isolated in a function so tests can freeze the release countdown.
+
+    :returns: The current time with the local timezone attached.
+    """
+    return datetime.now().astimezone()
+
+
+def _format_remaining(delta: timedelta) -> str:
+    """Format a duration like the web console's release countdown.
+
+    :param delta: Positive time remaining.
+    :returns: ``13d 05h 38m``, ``5h 38m``, or ``38m``.
+    """
+    minutes = int(delta.total_seconds() // 60)
+    days, remainder = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours:02d}h {minutes:02d}m"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
+
+
+def _format_instance_release(instance: dict[str, object], *, now: datetime | None = None) -> str:
+    """Return the auto-release countdown shown by the web console.
+
+    A powered-off instance is released if it is not powered on again within
+    :data:`SHUTDOWN_RETENTION` days of its last status change. Running
+    instances fall back to the scheduled stop, expiry, or rent deadline.
+
+    :param instance: One instance mapping returned by the API handler.
+    :param now: Current time, used by tests to freeze the countdown; defaults
+        to :func:`_current_time`.
+    :returns: ``in 13d 05h 38m``, ``due`` once the window has passed, or a
+        ``YYYY-MM-DD`` deadline.
+    """
+    if instance.get("status") == "shutdown":
+        status_at = _parse_timestamp(instance.get("status_at"))
+        if status_at is not None:
+            release_at = status_at + SHUTDOWN_RETENTION
+            current = now or _current_time()
+            if release_at.tzinfo is None:
+                current = current.replace(tzinfo=None)
+            else:
+                current = current.astimezone(release_at.tzinfo)
+            remaining = release_at - current
+            if remaining.total_seconds() <= 0:
+                return "due"
+            return f"in {_format_remaining(remaining)}"
+
+    for key in ("timed_shutdown_at", "expired_at"):
+        value = instance.get(key)
+        if isinstance(value, dict) and value.get("Valid"):
+            return _format_date(value.get("Time"))
+    return _format_date(instance.get("rent_deadline"))
+
+
 def _first_text(instance: dict[str, object], *keys: str) -> str:
     """Return the first non-empty string among ``keys``.
 
@@ -263,29 +423,63 @@ def _first_text(instance: dict[str, object], *keys: str) -> str:
     return "-"
 
 
-def _format_instance_summary(instance: dict[str, object]) -> str:
-    """Join the status, billing, GPU, region, and price into one line.
+def _text_width(value: str) -> int:
+    """Return the display width of a possibly multi-line cell.
+
+    :param value: Cell text.
+    :returns: The widest line's display width.
+    """
+    return max((cell_len(line) for line in value.splitlines()), default=0)
+
+
+def _format_instance_details(instance: dict[str, object]) -> str:
+    """Build the stacked detail cell used when the wide table cannot fit.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: Dot-separated fields, skipping missing values.
+    :returns: Several lines combining every field shown by the wide table.
     """
-    parts = (
-        _format_instance_status(instance),
-        _format_value(instance.get("charge_type")),
-        _format_instance_gpu(instance),
-        _first_text(instance, "region_name", "region_sign"),
-        _format_instance_price(instance),
+    location = _format_instance_location(instance)
+    name = instance.get("name")
+    header = f"{location} · {name}" if isinstance(name, str) and name else location
+
+    disk = _format_instance_disk(instance).replace("\n", " / ")
+    billing = _format_instance_billing(instance).replace("\n", " ")
+    lines = (
+        header,
+        f"Status {_format_instance_status(instance)} · Spec {_format_instance_spec(instance)}",
+        f"Disk {disk} · Health {_first_text(instance, 'disk_health_status')}",
+        f"Billing {billing} · Release {_format_instance_release(instance)}",
+        f"SSH {_format_value(instance.get('ssh_command'))}",
     )
-    return " · ".join(part for part in parts if part != "-") or "-"
+    return "\n".join(lines)
+
+
+def _render_stacked_instances(instances: Sequence[dict[str, object]]) -> None:
+    """Render instances as an ID column plus stacked details.
+
+    Used when the terminal is too narrow for even the short columns of the
+    wide table, so no identifier or field is silently truncated.
+
+    :param instances: Mappings returned by
+        :func:`autodl_cli.handlers.instance.list_instances`.
+    """
+    table = Table(title=f"Instances ({len(instances)})")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("Details")
+    for instance in instances:
+        table.add_row(_format_value(instance.get("uuid")), _format_instance_details(instance))
+    console.print(table)
 
 
 def render_instances(instances: Sequence[dict[str, object]]) -> None:
-    """Render a list of instances as a two-column Rich table.
+    """Render a list of instances as a one-row-per-instance Rich table.
 
-    Long connection strings would squeeze an eight-column table below a
-    readable width on an 80-column terminal, so each instance keeps its ID in
-    the first column and stacks the name, summary, and SSH command in the
-    second.
+    The columns mirror the web console: location/ID/name, status, spec, disk,
+    health, billing, release deadline, and SSH. Short columns keep their
+    content width; SSH takes whatever space is left and is ellipsised, or
+    omitted, on narrower terminals. If even the short columns do not fit, the
+    fields are stacked under the instance ID instead. ``--json`` callers
+    receive the complete data.
 
     :param instances: Mappings returned by
         :func:`autodl_cli.handlers.instance.list_instances`.
@@ -294,20 +488,47 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
         console.print("No instances found.")
         return
 
-    table = Table(title=f"Instances ({len(instances)})")
-    table.add_column("ID", no_wrap=True)
-    table.add_column("Instance")
+    headers = ("Instance", "Status", "Spec", "Disk", "Health", "Billing", "Release", "SSH")
+    rows = [
+        (
+            _format_instance_title(instance),
+            _format_instance_status(instance),
+            _format_instance_spec(instance),
+            _format_instance_disk(instance),
+            _first_text(instance, "disk_health_status"),
+            _format_instance_billing(instance),
+            _format_instance_release(instance),
+            _format_value(instance.get("ssh_command")),
+        )
+        for instance in instances
+    ]
 
-    for instance in instances:
-        lines: list[str] = []
-        name = instance.get("name")
-        if isinstance(name, str) and name:
-            lines.append(name)
-        lines.append(_format_instance_summary(instance))
-        ssh_command = instance.get("ssh_command")
-        if isinstance(ssh_command, str) and ssh_command:
-            lines.append(ssh_command)
-        table.add_row(_format_value(instance.get("uuid")), "\n".join(lines))
+    # Rich does not shrink no_wrap columns when the table is over-wide, so size
+    # the SSH column explicitly and let it absorb the remaining width.
+    content_widths = [
+        max(_text_width(header), *(_text_width(row[index]) for row in rows)) for index, header in enumerate(headers)
+    ]
+    cell_padding = 2  # one space on each side of every cell
+    border_width = 2 + len(headers) - 1  # table edges plus the inner borders
+    other_width = sum(width + cell_padding for width in content_widths[:-1])
+    ssh_width = max(1, console.width - border_width - other_width - cell_padding)
+    # Keep the column only while ``ssh -p …`` (8 cells) still fits; a shorter
+    # column would show little beyond the ellipsis.
+    include_ssh = ssh_width >= 8
+
+    if other_width + border_width - 1 > console.width:
+        _render_stacked_instances(instances)
+        return
+
+    table = Table(title=f"Instances ({len(instances)})")
+    for header in headers:
+        if header == "SSH":
+            if include_ssh:
+                table.add_column(header, max_width=ssh_width, no_wrap=True)
+            continue
+        table.add_column(header, no_wrap=True)
+    for row in rows:
+        table.add_row(*(row if include_ssh else row[:-1]))
 
     console.print(table)
 
