@@ -3,8 +3,9 @@
 ``list`` is implemented against ``POST /api/v1/instance``; its ``--query``
 filter is applied locally because the API has no keyword field. ``detail``
 reads one instance's configuration snapshot from
-``GET /api/v1/instance/snapshot``. The remaining lifecycle commands wait for
-their handlers.
+``GET /api/v1/instance/snapshot``. ``save-image`` posts to
+``POST /api/v1/instance/image/save``, which reports success with a null
+``data`` payload. The remaining lifecycle commands wait for their handlers.
 """
 
 from __future__ import annotations
@@ -129,6 +130,51 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.render_instance_detail(detail, instance_uuid=instance_uuid)
+
+
+@instance.command("save-image", help="Save an instance as a custom image.")
+@click.argument("instance_uuid")
+@click.argument("image_name")
+@click.option("--try-again", is_flag=True, help="Retry a previously failed save.")
+@click.pass_context
+def save_image_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    image_name: str,
+    try_again: bool,
+) -> None:
+    """Save an instance as a custom image.
+
+    AutoDL accepts the request and reports success immediately; the image may
+    take longer to appear under the account's private images.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param image_name: Name for the new image.
+    :param try_again: Whether AutoDL should retry a previously failed save.
+    :raises click.ClickException: When an argument is blank, no token is
+        configured, or the API call fails.
+    """
+    token = require_token(load_config())
+
+    try:
+        with AutoDLClient(token) as client:
+            result = instance_handler.save_image(
+                client,
+                instance_uuid,
+                image_name,
+                try_again=try_again,
+            )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Save requested for instance {result['instance_uuid']} as image {result['image_name']!r}.")
 
 
 def register_instance(main_group: click.Group) -> click.Group:

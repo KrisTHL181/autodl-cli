@@ -506,3 +506,98 @@ def test_detail_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) 
     assert result.exit_code == 1
     assert "token expired" in result.output
     assert "Traceback" not in result.output
+
+
+def test_save_image_forwards_arguments_and_returns_json(home: Path, monkeypatch) -> None:
+    """The positionals and ``--try-again`` reach the handler; JSON is passed through."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {
+        "instance_uuid": INSTANCE_UUID,
+        "image_name": "save-image-test1",
+        "try_again": True,
+        "saved": True,
+    }
+
+    def fake_save_image(client, instance_id, image_name, *, try_again):
+        captured.update(instance_id=instance_id, image_name=image_name, try_again=try_again)
+        return record
+
+    monkeypatch.setattr(instance_commands.instance_handler, "save_image", fake_save_image)
+
+    result = CliRunner().invoke(
+        main, ["--json", "instance", "save-image", INSTANCE_UUID, "save-image-test1", "--try-again"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID, "image_name": "save-image-test1", "try_again": True}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_save_image_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms which instance and image were requested."""
+    _seed_token()
+
+    def fake_save_image(client, instance_id, image_name, *, try_again):
+        return {
+            "instance_uuid": instance_id,
+            "image_name": image_name,
+            "try_again": try_again,
+            "saved": True,
+        }
+
+    monkeypatch.setattr(instance_commands.instance_handler, "save_image", fake_save_image)
+
+    result = CliRunner().invoke(main, ["instance", "save-image", INSTANCE_UUID, "save-image-test1"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Save requested for instance {INSTANCE_UUID} as image 'save-image-test1'." in result.output
+    assert TOKEN not in result.output
+
+
+def test_save_image_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> None:
+    """A blank name rejected by the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_save_image(client, instance_id, image_name, *, try_again):
+        raise ValueError("image_name must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "save_image", failing_save_image)
+
+    result = CliRunner().invoke(main, ["instance", "save-image", INSTANCE_UUID, " "])
+
+    assert result.exit_code == 1
+    assert "image_name must not be empty" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_save_image_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "save_image",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "save-image", INSTANCE_UUID, "test"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_save_image_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_save_image(client, instance_id, image_name, *, try_again):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "save_image", failing_save_image)
+
+    result = CliRunner().invoke(main, ["instance", "save-image", INSTANCE_UUID, "test"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output

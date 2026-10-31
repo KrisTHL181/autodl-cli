@@ -362,3 +362,100 @@ def test_list_instances_query_ignores_non_string_and_missing_fields() -> None:
 
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         assert instance_handler.list_instances(client, query="西北") == entries
+
+
+SAVE_INSTANCE_UUID = "wn8vt448yq-473b14de"
+
+
+def test_save_image_posts_expected_body_and_tolerates_null_data() -> None:
+    """The handler trims its inputs, POSTs the console body, and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.save_image(client, f" {SAVE_INSTANCE_UUID} ", " save-image-test1 ")
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/instance/image/save",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {
+            "image_name": "save-image-test1",
+            "instance_uuid": SAVE_INSTANCE_UUID,
+            "try_again": False,
+        },
+    }
+    assert result == {
+        "instance_uuid": SAVE_INSTANCE_UUID,
+        "image_name": "save-image-test1",
+        "try_again": False,
+        "saved": True,
+    }
+
+
+def test_save_image_forwards_try_again() -> None:
+    """``try_again`` reaches the request body and the returned record."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.save_image(client, SAVE_INSTANCE_UUID, "retry-me", try_again=True)
+
+    assert seen["body"] == {
+        "image_name": "retry-me",
+        "instance_uuid": SAVE_INSTANCE_UUID,
+        "try_again": True,
+    }
+    assert result["try_again"] is True
+
+
+@pytest.mark.parametrize(
+    ("instance_id", "image_name", "message"),
+    [
+        ("", "name", "instance_id must not be empty"),
+        ("   ", "name", "instance_id must not be empty"),
+        (SAVE_INSTANCE_UUID, "", "image_name must not be empty"),
+        (SAVE_INSTANCE_UUID, "  ", "image_name must not be empty"),
+    ],
+)
+def test_save_image_rejects_blank_arguments(instance_id: str, image_name: str, message: str) -> None:
+    """Blank inputs fail before any request is sent."""
+    with pytest.raises(ValueError, match=message):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.save_image(client, instance_id, image_name)
+
+
+def test_save_image_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-8"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.save_image(client, SAVE_INSTANCE_UUID, "name")
+
+
+def test_save_image_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "ImageNameExists", "msg": "duplicate name", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="duplicate name"):
+            instance_handler.save_image(client, SAVE_INSTANCE_UUID, "name")

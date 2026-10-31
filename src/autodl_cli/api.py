@@ -28,6 +28,7 @@ __all__ = [
     "list_images",
     "list_instances",
     "login",
+    "save_image",
 ]
 
 
@@ -170,6 +171,36 @@ def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.get_instance(client, instance_uuid)
+
+
+def save_image(
+    token: str,
+    instance_uuid: str,
+    image_name: str,
+    *,
+    try_again: bool = False,
+) -> dict[str, object]:
+    """Save an instance as a custom image.
+
+    AutoDL accepts the request and answers with a null ``data`` payload; the
+    image may take longer to appear under the account's private images.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :param image_name: Name for the new image.
+    :param try_again: Whether AutoDL should retry a previously failed save.
+    :returns: A mapping with ``instance_uuid``, ``image_name``, ``try_again``,
+        and ``saved``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.save_image(
+            client,
+            instance_uuid,
+            image_name,
+            try_again=try_again,
+        )
 
 
 def get_current_user(token: str) -> dict[str, object]:

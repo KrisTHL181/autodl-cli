@@ -94,3 +94,26 @@ def require_success_list(
     if isinstance(data, list):
         return data
     raise APIError(f"AutoDL {action} returned malformed data")
+
+
+def require_success_any(
+    payload: dict[str, object],
+    *,
+    action: str,
+    error_type: type[AutoDLError] | None = None,
+) -> object:
+    """Validate an API envelope and return its ``data`` value unchanged.
+
+    Write endpoints often answer with ``"data": null`` on success, so this
+    helper checks only the ``code`` field instead of imposing a shape on the
+    payload.
+
+    :param payload: Decoded API response.
+    :param action: Human-readable step name used in error messages.
+    :param error_type: Exception class raised for a non-``Success`` code. When
+        ``None``, auth-related codes raise :class:`AuthError` and every other
+        failure raises :class:`APIError`.
+    :returns: The ``data`` value, which may be ``None``.
+    :raises autodl_cli.errors.AutoDLError: When ``code`` is not ``"Success"``.
+    """
+    return _unwrap(payload, action=action, error_type=error_type)

@@ -10,6 +10,11 @@ One instance's configuration snapshot lives behind
 ``GET /api/v1/instance/snapshot``, keyed by the instance UUID. It describes the
 base image, GPU allocation, and host machine, but not the live status.
 
+Saving an instance as a custom image posts to
+``POST /api/v1/instance/image/save``. A successful save answers with
+``"data": null``, so :func:`save_image` validates only the envelope and returns
+a small record of what it requested.
+
 TODO: implement the remaining lifecycle handlers and return the structures
 defined in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
@@ -19,7 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
-from autodl_cli.handlers._common import require_success
+from autodl_cli.handlers._common import require_success, require_success_any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -31,6 +36,9 @@ INSTANCE_LIST_PATH = "/api/v1/instance"
 
 #: Path of the per-instance configuration snapshot endpoint.
 INSTANCE_DETAIL_PATH = "/api/v1/instance/snapshot"
+
+#: Path of the save-as-custom-image endpoint.
+INSTANCE_IMAGE_SAVE_PATH = "/api/v1/instance/image/save"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
@@ -255,12 +263,48 @@ def release_instance(client: AutoDLClient, instance_id: str) -> dict[str, object
     ...
 
 
-def save_image(client: AutoDLClient, instance_id: str, image_name: str) -> dict[str, object]:
+def save_image(
+    client: AutoDLClient,
+    instance_id: str,
+    image_name: str,
+    *,
+    try_again: bool = False,
+) -> dict[str, object]:
     """Save an instance as a custom image.
 
+    ``POST /api/v1/instance/image/save`` answers with ``"data": null`` on
+    success, so success is signalled by the envelope's ``code`` alone. The
+    request is accepted immediately; the image itself may take longer to
+    appear in the account.
+
     :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
+    :param instance_id: Instance UUID from :func:`list_instances`.
     :param image_name: Name for the new image.
-    :returns: The operation result.
+    :param try_again: Whether AutoDL should retry a previously failed save.
+    :returns: A mapping with ``instance_uuid``, ``image_name``, ``try_again``,
+        and ``saved``.
+    :raises ValueError: When ``instance_id`` or ``image_name`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
     """
-    ...
+    instance_uuid = instance_id.strip()
+    name = image_name.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+    if not name:
+        raise ValueError("image_name must not be empty")
+
+    body: dict[str, object] = {
+        "image_name": name,
+        "instance_uuid": instance_uuid,
+        "try_again": try_again,
+    }
+    payload = client.request("POST", INSTANCE_IMAGE_SAVE_PATH, json=body)
+    require_success_any(payload, action="save image")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "image_name": name,
+        "try_again": try_again,
+        "saved": True,
+    }

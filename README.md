@@ -128,7 +128,13 @@ autodl instance list
 autodl instance list --status running -q 4090
 autodl instance list --unbind-sub-user
 autodl instance detail <instance-uuid>
+autodl instance save-image <instance-uuid> my-image
+autodl instance save-image <instance-uuid> my-image --try-again
 ```
+
+`save-image` posts to `/api/v1/instance/image/save`; AutoDL accepts the request
+immediately, and the image appears under the account's private images once the
+save finishes.
 
 ### 🛠️ API Debugging
 
@@ -316,8 +322,8 @@ The codebase is laid out for extensibility:
   print, and go through `AutoDLClient` instead of `httpx`.
 - **New MCP tool?** Nothing to do — typed tools are generated from the Click tree.
 
-`nfs` and `config` command groups, the image create options, and the instance
-lifecycle (create, power on/off, release, save image) are not implemented yet;
+`nfs` and `config` command groups, the image create options, and the rest of
+the instance lifecycle (create, power on/off, release) are not implemented yet;
 their modules exist as placeholders.
 
 Run the formatter before submitting:
