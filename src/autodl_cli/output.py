@@ -12,15 +12,70 @@ import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+from rich import box
 from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 #: Shared console; Rich disables colour automatically when stdout is not a TTY.
-console = Console()
+#: Automatic highlighting is off so the explicit palette below is the only
+#: source of colour.
+console = Console(highlight=False)
+
+# Colour palette, mirroring the zhihu-cli conventions: cyan for titles and
+# structure, green for success, yellow for warnings, magenta for numbers,
+# red for errors, dim for secondary metadata, and bold for key labels.
+_STYLE_TITLE = "bold cyan"
+_STYLE_HEADER = "bold cyan"
+_STYLE_COLUMN = "cyan"
+_STYLE_LABEL = "bold"
+_STYLE_NUM = "magenta"
+_STYLE_MONEY = "bold magenta"
+_STYLE_META = "dim"
+_STYLE_OK = "bold green"
+_STYLE_WARN = "yellow"
+_STYLE_ERR = "bold red"
+_STYLE_LINK = "blue dim"
+
+
+def _table(title: str | None = None) -> Table:
+    """Build a table with the shared border and header styling.
+
+    :param title: Optional table title.
+    :returns: A Rich table using the rounded box and cyan headers.
+    """
+    return Table(title=title, box=box.ROUNDED, title_style=_STYLE_TITLE, header_style=_STYLE_HEADER)
+
+
+def _styled(value: object, style: str | None = None) -> Text:
+    """Wrap a value in a rich :class:`Text` cell.
+
+    :param value: Cell content.
+    :param style: Optional style name.
+    :returns: The styled text cell.
+    """
+    return Text(str(value), style=style)
+
+
+def _status_style(value: object) -> str:
+    """Pick a colour for a status-like string.
+
+    :param value: Status string from the API.
+    :returns: A style name: green for healthy, yellow for transitional, red
+        for failures, and cyan otherwise.
+    """
+    text = str(value).lower()
+    if text.startswith(("normal", "healthy", "ok", "running")):
+        return _STYLE_OK
+    if text.startswith(("shutdown", "stopped", "starting", "stopping", "pending")):
+        return _STYLE_WARN
+    if text.startswith(("error", "failed", "released", "due", "exception", "oom")):
+        return _STYLE_ERR
+    return _STYLE_COLUMN
 
 
 def render_json(payload: object) -> None:
@@ -83,9 +138,9 @@ def render_table(rows: Sequence[dict[str, object]], columns: Sequence[str]) -> N
     :param rows: Row mappings.
     :param columns: Column keys, in display order.
     """
-    table = Table()
+    table = _table()
     for column in columns:
-        table.add_column(column)
+        table.add_column(column, style=_STYLE_COLUMN)
     for row in rows:
         table.add_row(*(str(row.get(column, "")) for column in columns))
     console.print(table)
@@ -145,6 +200,32 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
+def _value_cell(value: object, style: str | None = None) -> Text:
+    """Format a value as a styled table cell.
+
+    :param value: Raw value from an API response.
+    :param style: Style for real values; ``"-"`` placeholders stay dim.
+    :returns: The formatted, styled cell.
+    """
+    text = _format_value(value)
+    return Text(text, style=_STYLE_META if text == "-" else style)
+
+
+def _count_cell(value: object, *, alert_zero: bool = False) -> Text:
+    """Format a numeric stock cell.
+
+    :param value: Raw count.
+    :param alert_zero: Whether a zero should be flagged in red.
+    :returns: The count in magenta, in red when zero and ``alert_zero`` is set.
+    """
+    text = _format_value(value)
+    if text == "-":
+        return Text(text, style=_STYLE_META)
+    if alert_zero and text == "0":
+        return Text(text, style=_STYLE_ERR)
+    return Text(text, style=_STYLE_NUM)
+
+
 def render_balance(balance: dict[str, object], *, charge_type: str | None = None) -> None:
     """Render a wallet balance as a Rich table.
 
@@ -155,7 +236,7 @@ def render_balance(balance: dict[str, object], *, charge_type: str | None = None
     :param charge_type: Billing mode included in the table title, when known.
     """
     title = "Account balance" if charge_type is None else f"Account balance ({charge_type})"
-    table = Table(title=title)
+    table = _table(title)
     table.add_column("Item")
     table.add_column("Value", justify="right")
 
@@ -164,12 +245,15 @@ def render_balance(balance: dict[str, object], *, charge_type: str | None = None
         if key not in balance:
             continue
         value = balance[key]
-        rendered = _format_yuan(value) if key in _BALANCE_MONEY_FIELDS else _format_value(value)
-        table.add_row(label, rendered)
+        if key in _BALANCE_MONEY_FIELDS:
+            rendered = _styled(_format_yuan(value), _STYLE_MONEY)
+        else:
+            rendered = _styled(_format_value(value), _STYLE_NUM)
+        table.add_row(_styled(label, _STYLE_LABEL), rendered)
         rows_added = True
 
     if not rows_added:
-        console.print(f"{title}: no data returned.")
+        console.print(f"{title}: no data returned.", style=_STYLE_META)
         return
     console.print(table)
 
@@ -208,12 +292,30 @@ def _format_phone(account: dict[str, object]) -> str:
     return phone
 
 
+def _account_value_style(label: str, text: str) -> str:
+    """Pick a colour for one account field value.
+
+    :param label: Field label.
+    :param text: Already-formatted value.
+    :returns: A style name.
+    """
+    if label in ("Username", "Nickname"):
+        return _STYLE_OK
+    if label == "Status":
+        return _status_style(text)
+    if label in ("Registered", "Last login"):
+        return _STYLE_META
+    if label == "Role":
+        return _STYLE_WARN
+    return _STYLE_COLUMN
+
+
 def render_account(account: dict[str, object]) -> None:
     """Render an account profile as a Rich table.
 
     :param account: The account mapping returned by :func:`autodl_cli.handlers.account.get_me`.
     """
-    table = Table(title="Account")
+    table = _table("Account")
     table.add_column("Field")
     table.add_column("Value")
 
@@ -245,7 +347,8 @@ def render_account(account: dict[str, object]) -> None:
     for label, value in fields:
         if value is None or (isinstance(value, str) and not value):
             continue
-        table.add_row(label, _format_value(value))
+        text = _format_value(value)
+        table.add_row(_styled(label, _STYLE_LABEL), _styled(text, _account_value_style(label, text)))
 
     console.print(table)
 
@@ -263,17 +366,22 @@ def _format_instance_location(instance: dict[str, object]) -> str:
     return region
 
 
-def _format_instance_title(instance: dict[str, object]) -> str:
+def _format_instance_title(instance: dict[str, object]) -> Text:
     """Build the multi-line identifier cell of the wide table.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: Location, UUID, and name (when set), one per line.
+    :returns: Location, UUID, and name (when set), one per line; the location
+        is dimmed, the UUID is cyan, and the name is bold.
     """
-    lines = [_format_instance_location(instance), _format_value(instance.get("uuid"))]
+    text = Text()
+    text.append(_format_instance_location(instance), style=_STYLE_META)
+    text.append("\n")
+    text.append(_format_value(instance.get("uuid")), style=_STYLE_COLUMN)
     name = instance.get("name")
     if isinstance(name, str) and name:
-        lines.append(name)
-    return "\n".join(lines)
+        text.append("\n")
+        text.append(name, style=_STYLE_LABEL)
+    return text
 
 
 def _format_instance_status(instance: dict[str, object]) -> str:
@@ -291,6 +399,23 @@ def _format_instance_status(instance: dict[str, object]) -> str:
     if instance.get("oom_killed") is True:
         status = f"{status} (OOM)"
     return status
+
+
+def _instance_status_cell(instance: dict[str, object]) -> Text:
+    """Build the colour-coded status cell.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The status coloured by health, with the sub-status dimmed and
+        an OOM marker in red.
+    """
+    text = Text()
+    text.append(_format_value(instance.get("status")), style=_status_style(instance.get("status")))
+    sub_status = instance.get("sub_status")
+    if isinstance(sub_status, str) and sub_status:
+        text.append(f" ({sub_status})", style=_STYLE_META)
+    if instance.get("oom_killed") is True:
+        text.append(" (OOM)", style=_STYLE_ERR)
+    return text
 
 
 def _format_instance_spec(instance: dict[str, object]) -> str:
@@ -339,15 +464,36 @@ def _format_instance_cards(instance: dict[str, object]) -> str:
     return ""
 
 
-def _format_instance_spec_cell(instance: dict[str, object]) -> str:
+def _instance_cards_cell(instance: dict[str, object]) -> Text | None:
+    """Build the card-availability cell.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: ``Cards <idle>/<total>`` in magenta, or red when no card is
+        idle, or ``None`` when the machine does not report card counts.
+    """
+    cards = _format_instance_cards(instance)
+    if not cards:
+        return None
+    idle = instance.get("gpu_idle_num")
+    style = _STYLE_ERR if idle == 0 else _STYLE_NUM
+    return Text(cards, style=style)
+
+
+def _format_instance_spec_cell(instance: dict[str, object]) -> Text:
     """Build the Spec cell: the GPU allocation plus card availability.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: The spec, with the card line appended when reported.
+    :returns: The spec in cyan (yellow for CPU mode), with the card line
+        appended when reported.
     """
-    cards = _format_instance_cards(instance)
     spec = _format_instance_spec(instance)
-    return f"{spec}\n{cards}" if cards else spec
+    text = Text()
+    text.append(spec, style=_STYLE_WARN if spec == "CPU" else _STYLE_COLUMN)
+    cards = _instance_cards_cell(instance)
+    if cards is not None:
+        text.append("\n")
+        text.append_text(cards)
+    return text
 
 
 def _format_instance_price(instance: dict[str, object]) -> str:
@@ -366,43 +512,75 @@ def _format_instance_price(instance: dict[str, object]) -> str:
     return "-"
 
 
-def _format_instance_billing(instance: dict[str, object]) -> str:
-    """Format the billing mode and price.
+def _instance_billing_cell(instance: dict[str, object]) -> Text:
+    """Build the billing cell: charge type plus price.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: The charge type, plus the price on a second line when one is
-        reported.
+    :returns: The charge type in dim text and the price in magenta, one per
+        line.
     """
-    lines = [_format_value(instance.get("charge_type"))]
+    text = Text()
+    text.append(_format_value(instance.get("charge_type")), style=_STYLE_META)
     price = _format_instance_price(instance)
     if price != "-":
-        lines.append(price)
-    return "\n".join(lines)
+        text.append("\n")
+        text.append(price, style=_STYLE_MONEY)
+    return text
 
 
-def _format_instance_disk(instance: dict[str, object]) -> str:
-    """Format system and data disk usage as two lines of percentages.
+def _disk_percentages(instance: dict[str, object]) -> tuple[float | None, float | None]:
+    """Return the system- and data-disk usage percentages.
 
     The data-disk figures only exist inside ``usage_info``; the system-disk
     rate is reported directly on the instance.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: ``Sys NN.NN%`` and ``Data NN.NN%`` lines.
+    :returns: A ``(system, data)`` pair, with ``None`` for a missing value.
     """
     system_rate = instance.get("root_fs_used_rate")
-    if isinstance(system_rate, (int, float)) and not isinstance(system_rate, bool):
-        system = f"Sys {system_rate * 100:.2f}%"
-    else:
-        system = "Sys -"
+    system = system_rate * 100 if isinstance(system_rate, (int, float)) and not isinstance(system_rate, bool) else None
 
-    data = "-"
+    data: float | None = None
     usage = instance.get("usage_info")
     if isinstance(usage, dict):
         used = usage.get("data_disk_used_size")
         total = usage.get("data_disk_total_size")
         if isinstance(used, int) and isinstance(total, int) and total > 0:
-            data = f"{used / total * 100:.2f}%"
-    return f"{system}\nData {data}"
+            data = used / total * 100
+    return system, data
+
+
+def _disk_style(percent: float) -> str:
+    """Pick a colour for a disk usage percentage.
+
+    :param percent: Usage percentage.
+    :returns: Red at or above 90%, yellow from 75%, green otherwise.
+    """
+    if percent >= 90:
+        return _STYLE_ERR
+    if percent >= 75:
+        return _STYLE_WARN
+    return _STYLE_OK
+
+
+def _instance_disk_cell(instance: dict[str, object], *, separator: str = "\n") -> Text:
+    """Build a colour-coded disk usage cell.
+
+    :param instance: One instance mapping returned by the API handler.
+    :param separator: Text placed between the system and data figures.
+    :returns: The labels dimmed and each percentage coloured by severity.
+    """
+    system, data = _disk_percentages(instance)
+    text = Text()
+    for index, (label, percent) in enumerate((("Sys", system), ("Data", data))):
+        if index:
+            text.append(separator, style=_STYLE_META)
+        text.append(f"{label} ", style=_STYLE_META)
+        if percent is None:
+            text.append("-", style=_STYLE_META)
+        else:
+            text.append(f"{percent:.2f}%", style=_disk_style(percent))
+    return text
 
 
 def _format_date(value: object) -> str:
@@ -512,15 +690,34 @@ def _format_instance_stop(instance: dict[str, object]) -> str:
     return ""
 
 
-def _format_instance_release_cell(instance: dict[str, object]) -> str:
+def _release_style(release: str) -> str:
+    """Pick a colour for a release deadline.
+
+    :param release: Formatted release text.
+    :returns: Red when due, yellow while counting down, cyan for a date.
+    """
+    if release == "due":
+        return _STYLE_ERR
+    if release.startswith("in "):
+        return _STYLE_WARN
+    return _STYLE_COLUMN
+
+
+def _format_instance_release_cell(instance: dict[str, object]) -> Text:
     """Build the Release cell: the release deadline plus timed shutdown.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: The release text, with the scheduled stop appended when set.
+    :returns: The release text coloured by urgency, with the scheduled stop
+        appended in yellow when set.
     """
-    stop = _format_instance_stop(instance)
     release = _format_instance_release(instance)
-    return f"{release}\n{stop}" if stop else release
+    text = Text()
+    text.append(release, style=_release_style(release))
+    stop = _format_instance_stop(instance)
+    if stop:
+        text.append("\n")
+        text.append(stop, style=_STYLE_WARN)
+    return text
 
 
 def _first_text(instance: dict[str, object], *keys: str) -> str:
@@ -537,43 +734,75 @@ def _first_text(instance: dict[str, object], *keys: str) -> str:
     return "-"
 
 
-def _text_width(value: str) -> int:
+def _text_width(value: str | Text) -> int:
     """Return the display width of a possibly multi-line cell.
 
-    :param value: Cell text.
+    :param value: Cell text, plain or rich.
     :returns: The widest line's display width.
     """
-    return max((cell_len(line) for line in value.splitlines()), default=0)
+    text = value.plain if isinstance(value, Text) else value
+    return max((cell_len(line) for line in text.splitlines()), default=0)
 
 
-def _format_instance_details(instance: dict[str, object]) -> str:
+def _instance_health_cell(instance: dict[str, object]) -> Text:
+    """Build the disk-health cell.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The health string in green when normal, yellow otherwise.
+    """
+    health = _first_text(instance, "disk_health_status")
+    if health == "-":
+        return Text("-", style=_STYLE_META)
+    return Text(health, style=_STYLE_OK if health.lower() in {"normal", "healthy", "ok"} else _STYLE_WARN)
+
+
+def _format_instance_details(instance: dict[str, object]) -> Text:
     """Build the stacked detail cell used when the wide table cannot fit.
 
     :param instance: One instance mapping returned by the API handler.
-    :returns: Several lines combining every field shown by the wide table.
+    :returns: Several styled lines combining every field shown by the wide
+        table.
     """
-    location = _format_instance_location(instance)
+    text = Text()
+    text.append(_format_instance_location(instance), style=_STYLE_META)
     name = instance.get("name")
-    header = f"{location} · {name}" if isinstance(name, str) and name else location
+    if isinstance(name, str) and name:
+        text.append(" · ", style=_STYLE_META)
+        text.append(name, style=_STYLE_LABEL)
 
-    disk = _format_instance_disk(instance).replace("\n", " / ")
-    billing = _format_instance_billing(instance).replace("\n", " ")
-    spec = f"Spec {_format_instance_spec(instance)}"
-    cards = _format_instance_cards(instance)
-    if cards:
-        spec = f"{spec} · {cards}"
-    release = f"Release {_format_instance_release(instance)}"
+    text.append("\nStatus ", style=_STYLE_META)
+    text.append_text(_instance_status_cell(instance))
+    text.append(" · Spec ", style=_STYLE_META)
+    spec = _format_instance_spec(instance)
+    text.append(spec, style=_STYLE_WARN if spec == "CPU" else _STYLE_COLUMN)
+    cards = _instance_cards_cell(instance)
+    if cards is not None:
+        text.append(" · ", style=_STYLE_META)
+        text.append_text(cards)
+
+    text.append("\nDisk ", style=_STYLE_META)
+    text.append_text(_instance_disk_cell(instance, separator=" / "))
+    text.append(" · Health ", style=_STYLE_META)
+    text.append_text(_instance_health_cell(instance))
+
+    text.append("\nBilling ", style=_STYLE_META)
+    text.append(_format_value(instance.get("charge_type")), style=_STYLE_META)
+    price = _format_instance_price(instance)
+    if price != "-":
+        text.append(" ", style=_STYLE_META)
+        text.append(price, style=_STYLE_MONEY)
+    release = _format_instance_release(instance)
+    text.append(" · Release ", style=_STYLE_META)
+    text.append(release, style=_release_style(release))
     stop = _format_instance_stop(instance)
     if stop:
-        release = f"{release} · {stop}"
-    lines = (
-        header,
-        f"Status {_format_instance_status(instance)} · {spec}",
-        f"Disk {disk} · Health {_first_text(instance, 'disk_health_status')}",
-        f"Billing {billing} · {release}",
-        f"SSH {_format_value(instance.get('ssh_command'))}",
-    )
-    return "\n".join(lines)
+        text.append(" · ", style=_STYLE_META)
+        text.append(stop, style=_STYLE_WARN)
+
+    ssh = _format_value(instance.get("ssh_command"))
+    text.append("\nSSH ", style=_STYLE_META)
+    text.append(ssh, style=_STYLE_META if ssh == "-" else _STYLE_LINK)
+    return text
 
 
 def _render_stacked_instances(instances: Sequence[dict[str, object]]) -> None:
@@ -585,11 +814,11 @@ def _render_stacked_instances(instances: Sequence[dict[str, object]]) -> None:
     :param instances: Mappings returned by
         :func:`autodl_cli.handlers.instance.list_instances`.
     """
-    table = Table(title=f"Instances ({len(instances)})")
+    table = _table(f"Instances ({len(instances)})")
     table.add_column("ID", no_wrap=True)
     table.add_column("Details")
     for instance in instances:
-        table.add_row(_format_value(instance.get("uuid")), _format_instance_details(instance))
+        table.add_row(_value_cell(instance.get("uuid"), _STYLE_COLUMN), _format_instance_details(instance))
     console.print(table)
 
 
@@ -608,20 +837,20 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
         :func:`autodl_cli.handlers.instance.list_instances`.
     """
     if not instances:
-        console.print("No instances found.")
+        console.print("No instances found.", style=_STYLE_META)
         return
 
     headers = ("Instance", "Status", "Spec", "Disk", "Health", "Billing", "Release", "SSH")
     rows = [
         (
             _format_instance_title(instance),
-            _format_instance_status(instance),
+            _instance_status_cell(instance),
             _format_instance_spec_cell(instance),
-            _format_instance_disk(instance),
-            _first_text(instance, "disk_health_status"),
-            _format_instance_billing(instance),
+            _instance_disk_cell(instance),
+            _instance_health_cell(instance),
+            _instance_billing_cell(instance),
             _format_instance_release_cell(instance),
-            _format_value(instance.get("ssh_command")),
+            _value_cell(instance.get("ssh_command"), _STYLE_LINK),
         )
         for instance in instances
     ]
@@ -643,7 +872,7 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
         _render_stacked_instances(instances)
         return
 
-    table = Table(title=f"Instances ({len(instances)})")
+    table = _table(f"Instances ({len(instances)})")
     for header in headers:
         if header == "SSH":
             if include_ssh:
@@ -808,6 +1037,24 @@ def _format_yes_no(value: object) -> str:
     return _format_value(value)
 
 
+def _detail_value_style(label: str, text: str) -> str:
+    """Pick a colour for one instance-detail value.
+
+    :param label: Field label.
+    :param text: Already-formatted value.
+    :returns: A style name.
+    """
+    if label == "Restarted":
+        return _STYLE_META
+    if label == "NVIDIA Docker":
+        return _STYLE_OK if text == "yes" else _STYLE_WARN
+    if label == "Price":
+        return _STYLE_MONEY
+    if label in ("GPU memory", "CPU cores", "Memory", "Machine disk", "Instance disk limit", "Writable now"):
+        return _STYLE_NUM
+    return _STYLE_COLUMN
+
+
 def render_instance_detail(detail: dict[str, object], *, instance_uuid: str | None = None) -> None:
     """Render one instance's configuration snapshot as a Rich table.
 
@@ -872,15 +1119,15 @@ def render_instance_detail(detail: dict[str, object], *, instance_uuid: str | No
             target.append((label, text))
 
     title = "Instance detail" if not instance_uuid else f"Instance {instance_uuid}"
-    table = Table(title=title)
+    table = _table(title)
     table.add_column("Field")
     table.add_column("Value")
     for section, section_rows in sections:
         if not section_rows:
             continue
-        table.add_row(section, "", style="bold")
+        table.add_row(Text(section, style=_STYLE_TITLE), "")
         for label, value in section_rows:
-            table.add_row(label, value)
+            table.add_row(_styled(label, _STYLE_LABEL), _styled(value, _detail_value_style(label, value)))
 
     console.print(table)
 
@@ -896,10 +1143,10 @@ def render_regions(regions: Sequence[dict[str, object]]) -> None:
         :func:`autodl_cli.handlers.gpu.list_regions`.
     """
     if not regions:
-        console.print("No regions found.")
+        console.print("No regions found.", style=_STYLE_META)
         return
 
-    table = Table(title="Available regions")
+    table = _table("Available regions")
     table.add_column("Region")
     table.add_column("Data center")
     table.add_column("Signs")
@@ -907,12 +1154,12 @@ def render_regions(regions: Sequence[dict[str, object]]) -> None:
         signs = region.get("region_signs")
         sign_text = ", ".join(sign for sign in signs if isinstance(sign, str)) if isinstance(signs, list) else ""
         table.add_row(
-            _format_value(region.get("region_name")),
-            _format_value(region.get("data_center")),
-            _format_value(sign_text),
+            _value_cell(region.get("region_name"), _STYLE_COLUMN),
+            _value_cell(region.get("data_center"), _STYLE_COLUMN),
+            _value_cell(sign_text, _STYLE_WARN),
         )
     console.print(table)
-    console.print("Pick a sign from the Signs column and pass it to -r/--region.", style="dim")
+    console.print("Pick a sign from the Signs column and pass it to -r/--region.", style=_STYLE_META)
 
 
 def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
@@ -926,10 +1173,10 @@ def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
         :func:`autodl_cli.handlers.gpu.list_gpu_availability`.
     """
     if not regions:
-        console.print("No GPU availability found.")
+        console.print("No GPU availability found.", style=_STYLE_META)
         return
 
-    table = Table(title="GPU availability")
+    table = _table("GPU availability")
     table.add_column("Region")
     table.add_column("GPU")
     table.add_column("Idle", justify="right")
@@ -939,17 +1186,23 @@ def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
         region_name = _format_value(region.get("region_name"))
         gpus = region.get("gpus")
         if not isinstance(gpus, list) or not gpus:
-            table.add_row(region_name, "-", "-", "-", "-")
+            table.add_row(
+                _styled(region_name, _STYLE_COLUMN),
+                _styled("-", _STYLE_META),
+                _styled("-", _STYLE_META),
+                _styled("-", _STYLE_META),
+                _styled("-", _STYLE_META),
+            )
             continue
         for gpu in gpus:
             if not isinstance(gpu, dict):
                 continue
             table.add_row(
-                region_name,
-                _format_value(gpu.get("gpu_type")),
-                _format_value(gpu.get("idle_gpu_num")),
-                _format_value(gpu.get("total_gpu_num")),
-                _format_value(gpu.get("chip_corp")),
+                _styled(region_name, _STYLE_COLUMN),
+                _value_cell(gpu.get("gpu_type"), _STYLE_LABEL),
+                _count_cell(gpu.get("idle_gpu_num"), alert_zero=True),
+                _count_cell(gpu.get("total_gpu_num")),
+                _value_cell(gpu.get("chip_corp"), _STYLE_META),
             )
     console.print(table)
 
@@ -965,10 +1218,10 @@ def render_gpu_matches(matches: Sequence[dict[str, object]]) -> None:
         :func:`autodl_cli.handlers.gpu.find_gpu`.
     """
     if not matches:
-        console.print("No matching GPUs found.")
+        console.print("No matching GPUs found.", style=_STYLE_META)
         return
 
-    table = Table(title=f"Matching GPUs ({len(matches)})")
+    table = _table(f"Matching GPUs ({len(matches)})")
     table.add_column("Region")
     table.add_column("GPU")
     table.add_column("Idle", justify="right")
@@ -976,11 +1229,11 @@ def render_gpu_matches(matches: Sequence[dict[str, object]]) -> None:
     table.add_column("Chip")
     for gpu in matches:
         table.add_row(
-            _format_value(gpu.get("region_name")),
-            _format_value(gpu.get("gpu_type")),
-            _format_value(gpu.get("idle_gpu_num")),
-            _format_value(gpu.get("total_gpu_num")),
-            _format_value(gpu.get("chip_corp")),
+            _value_cell(gpu.get("region_name"), _STYLE_COLUMN),
+            _value_cell(gpu.get("gpu_type"), _STYLE_LABEL),
+            _count_cell(gpu.get("idle_gpu_num"), alert_zero=True),
+            _count_cell(gpu.get("total_gpu_num")),
+            _value_cell(gpu.get("chip_corp"), _STYLE_META),
         )
     console.print(table)
 
@@ -1000,32 +1253,57 @@ def _format_gib(value: object) -> str:
     return f"{gib:.0f}G"
 
 
-def _format_machine_region(machine: dict[str, object]) -> str:
-    """Return the region name with its sign on a second line.
+def _machine_region_cell(machine: dict[str, object]) -> Text:
+    """Build the region cell: region over its sign.
 
-    :param machine: One mapping returned by
-        :func:`autodl_cli.handlers.gpu.list_machines`.
-    :returns: ``"北京B区\\nbj-B1"``, or whichever part is present.
+    :param machine: One machine mapping.
+    :returns: The region in cyan with the sign dimmed on a second line.
     """
-    region = _format_value(machine.get("region_name"))
+    text = Text()
+    text.append(_format_value(machine.get("region_name")), style=_STYLE_COLUMN)
     sign = machine.get("region_sign")
     if isinstance(sign, str) and sign:
-        return f"{region}\n{sign}"
-    return region
+        text.append("\n")
+        text.append(sign, style=_STYLE_META)
+    return text
 
 
-def _format_machine_title(machine: dict[str, object]) -> str:
+def _machine_title_cell(machine: dict[str, object]) -> Text:
     """Build the identifier cell: alias (or name) over the machine ID.
 
     :param machine: One machine mapping.
-    :returns: The two-line identifier.
+    :returns: The alias in bold with the machine ID dimmed on a second line.
     """
     alias = machine.get("machine_alias")
     header = alias if isinstance(alias, str) and alias else _format_value(machine.get("machine_name"))
+    text = Text()
+    text.append(header, style=_STYLE_LABEL)
     machine_id = machine.get("machine_id")
     if isinstance(machine_id, str) and machine_id:
-        return f"{header}\n{machine_id}"
-    return header
+        text.append("\n")
+        text.append(machine_id, style=_STYLE_META)
+    return text
+
+
+def _machine_idle_cell(machine: dict[str, object]) -> Text:
+    """Build the ``idle/total`` stock cell.
+
+    :param machine: One machine mapping.
+    :returns: The idle count in red when zero, magenta otherwise, with the
+        total count dimmed.
+    """
+    idle = _format_value(machine.get("gpu_idle_num"))
+    total = _format_value(machine.get("gpu_number"))
+    if idle == "-":
+        idle_style = _STYLE_META
+    elif idle == "0":
+        idle_style = _STYLE_ERR
+    else:
+        idle_style = _STYLE_NUM
+    text = Text()
+    text.append(idle, style=idle_style)
+    text.append(f"/{total}", style=_STYLE_META)
+    return text
 
 
 def _format_machine_spec(machine: dict[str, object]) -> str:
@@ -1058,16 +1336,16 @@ def _render_machine_page_footer(page: Mapping[str, object]) -> None:
     total = _format_value(page.get("result_total"))
     max_page = page.get("max_page")
     if page.get("all_pages"):
-        console.print(f"Showing every page ({total} machines).", style="dim")
+        console.print(f"Showing every page ({total} machines).", style=_STYLE_META)
         return
     if isinstance(max_page, int) and not isinstance(max_page, bool) and max_page > 1:
         console.print(
             f"Page {_format_value(page.get('page_index'))}/{max_page} · {total} machines · "
             "use --page, --page-size, or --all.",
-            style="dim",
+            style=_STYLE_META,
         )
         return
-    console.print(f"{total} machines.", style="dim")
+    console.print(f"{total} machines.", style=_STYLE_META)
 
 
 #: Machine table columns, in display order.
@@ -1084,33 +1362,32 @@ _MACHINE_HEADERS: tuple[str, ...] = (
 )
 
 
-def _machine_row(machine: dict[str, object]) -> tuple[str, ...]:
+def _machine_row(machine: dict[str, object]) -> tuple[Text, ...]:
     """Build one row of the wide machine table.
 
     :param machine: One mapping returned by
         :func:`autodl_cli.handlers.gpu.list_machines`.
-    :returns: One cell per entry of :data:`_MACHINE_HEADERS`.
+    :returns: One styled cell per entry of :data:`_MACHINE_HEADERS`.
     """
-    idle = _format_value(machine.get("gpu_idle_num"))
-    total = _format_value(machine.get("gpu_number"))
     return (
-        _format_machine_region(machine),
-        _format_machine_title(machine),
-        _format_value(machine.get("gpu_name")),
-        f"{idle}/{total}",
-        _format_machine_price(machine, "payg_price"),
-        _format_machine_price(machine, "daily_price"),
-        _format_machine_spec(machine),
-        _format_gib(machine.get("max_instance_disk_size")),
-        _format_value(machine.get("highest_cuda_version")),
+        _machine_region_cell(machine),
+        _machine_title_cell(machine),
+        _value_cell(machine.get("gpu_name"), _STYLE_COLUMN),
+        _machine_idle_cell(machine),
+        _value_cell(_format_machine_price(machine, "payg_price"), _STYLE_MONEY),
+        _value_cell(_format_machine_price(machine, "daily_price"), _STYLE_MONEY),
+        _value_cell(_format_machine_spec(machine), _STYLE_NUM),
+        _value_cell(_format_gib(machine.get("max_instance_disk_size")), _STYLE_NUM),
+        _value_cell(machine.get("highest_cuda_version"), _STYLE_META),
     )
 
 
-def _format_machine_details(machine: dict[str, object]) -> str:
+def _format_machine_details(machine: dict[str, object]) -> Text:
     """Build the stacked detail cell used when the wide table cannot fit.
 
     :param machine: One machine mapping.
-    :returns: Three lines combining every field shown by the wide table.
+    :returns: Three styled lines combining every field shown by the wide
+        table.
     """
     region = _format_value(machine.get("region_name"))
     sign = machine.get("region_sign")
@@ -1122,20 +1399,27 @@ def _format_machine_details(machine: dict[str, object]) -> str:
     if isinstance(machine_id, str) and machine_id:
         label = f"{label} ({machine_id})"
 
-    idle = _format_value(machine.get("gpu_idle_num"))
     total = _format_value(machine.get("gpu_number"))
-    gpu = _format_value(machine.get("gpu_name"))
-    cuda = _format_value(machine.get("highest_cuda_version"))
-    payg = _format_machine_price(machine, "payg_price")
-    daily = _format_machine_price(machine, "daily_price")
-    return "\n".join(
-        (
-            f"{region} · {label}",
-            f"{gpu} ×{total} · Idle {idle}/{total} · CUDA {cuda}",
-            f"{payg}/h · {daily}/day · {_format_machine_spec(machine)} · "
-            f"Disk {_format_gib(machine.get('max_instance_disk_size'))}",
-        )
-    )
+    text = Text()
+    text.append(region, style=_STYLE_COLUMN)
+    text.append(" · ", style=_STYLE_META)
+    text.append(label, style=_STYLE_LABEL)
+    text.append("\n")
+    text.append(_format_value(machine.get("gpu_name")), style=_STYLE_COLUMN)
+    text.append(f" ×{total}", style=_STYLE_NUM)
+    text.append(" · Idle ", style=_STYLE_META)
+    text.append_text(_machine_idle_cell(machine))
+    text.append(" · CUDA ", style=_STYLE_META)
+    text.append(_format_value(machine.get("highest_cuda_version")), style=_STYLE_META)
+    text.append("\n")
+    text.append(_format_machine_price(machine, "payg_price"), style=_STYLE_MONEY)
+    text.append("/h · ", style=_STYLE_META)
+    text.append(_format_machine_price(machine, "daily_price"), style=_STYLE_MONEY)
+    text.append("/day · ", style=_STYLE_META)
+    text.append(_format_machine_spec(machine), style=_STYLE_NUM)
+    text.append(" · Disk ", style=_STYLE_META)
+    text.append(_format_gib(machine.get("max_instance_disk_size")), style=_STYLE_NUM)
+    return text
 
 
 def _render_stacked_machines(machines: Sequence[dict[str, object]]) -> None:
@@ -1147,7 +1431,7 @@ def _render_stacked_machines(machines: Sequence[dict[str, object]]) -> None:
     :param machines: Mappings returned by
         :func:`autodl_cli.handlers.gpu.list_machines`.
     """
-    table = Table(title=f"GPU machines ({len(machines)})")
+    table = _table(f"GPU machines ({len(machines)})")
     table.add_column("Details")
     for machine in machines:
         table.add_row(_format_machine_details(machine))
@@ -1168,12 +1452,12 @@ def render_gpu_machines(page: Mapping[str, object]) -> None:
     """
     entries = page.get("machines")
     if not isinstance(entries, list) or not entries:
-        console.print("No matching machines found.")
+        console.print("No matching machines found.", style=_STYLE_META)
         return
 
     machines = [machine for machine in entries if isinstance(machine, dict)]
     if not machines:
-        console.print("No matching machines found.")
+        console.print("No matching machines found.", style=_STYLE_META)
         return
     rows = [_machine_row(machine) for machine in machines]
 
@@ -1190,7 +1474,7 @@ def render_gpu_machines(page: Mapping[str, object]) -> None:
         _render_machine_page_footer(page)
         return
 
-    table = Table(title=f"GPU machines ({len(machines)})")
+    table = _table(f"GPU machines ({len(machines)})")
     for header in _MACHINE_HEADERS:
         right_aligned = header not in ("Region", "Machine", "GPU", "CUDA")
         table.add_column(header, justify="right" if right_aligned else "left")
@@ -1206,7 +1490,7 @@ def success(message: str) -> None:
 
     :param message: Text to display.
     """
-    console.print(message, style="green", markup=False)
+    console.print(message, style=_STYLE_OK, markup=False)
 
 
 def info(message: str) -> None:
@@ -1214,7 +1498,7 @@ def info(message: str) -> None:
 
     :param message: Text to display.
     """
-    console.print(message, markup=False)
+    console.print(message, style=_STYLE_META, markup=False)
 
 
 def warning(message: str) -> None:
@@ -1222,7 +1506,7 @@ def warning(message: str) -> None:
 
     :param message: Text to display.
     """
-    console.print(message, style="yellow", markup=False)
+    console.print(message, style=_STYLE_WARN, markup=False)
 
 
 def error(message: str) -> None:
@@ -1230,4 +1514,4 @@ def error(message: str) -> None:
 
     :param message: Text to display.
     """
-    console.print(message, style="red", stderr=True, markup=False)
+    console.print(message, style=_STYLE_ERR, stderr=True, markup=False)
