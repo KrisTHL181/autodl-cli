@@ -1,4 +1,4 @@
-"""Global pytest setup: redirect the whole autodl-toolkit data tree.
+"""Global pytest setup: redirect the whole autodl-cli data tree.
 
 The redirect must happen **before the first** ``import autodl_cli``. Modules
 that capture :func:`autodl_cli.paths.autodl_home` at import time would

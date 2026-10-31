@@ -60,7 +60,7 @@ else:
 def main() -> None:
     """Serve MCP over stdio, optionally restricted to selected command groups."""
     if _MCP_IMPORT_ERROR is not None:
-        sys.exit("autodl-mcp needs the optional MCP dependency.\nInstall it with: pip install 'autodl-toolkit[mcp]'")
+        sys.exit("autodl-mcp needs the optional MCP dependency.\nInstall it with: pip install 'autodl-cli[mcp]'")
     _bridge.run()
 
 

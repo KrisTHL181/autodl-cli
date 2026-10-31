@@ -1,6 +1,6 @@
 """Public library entry point.
 
-Code that consumes autodl-toolkit as a library should import from here rather
+Code that consumes autodl-cli as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
 handler surface for password login, browser-token lookup, account balance, and
 instance listing/details, and normalises internal exceptions into the

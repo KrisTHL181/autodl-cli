@@ -21,7 +21,7 @@ from autodl_cli.commands.tools import register_tools
 
 
 @click.group(help="Manage AutoDL container instances from the command line.")
-@click.version_option(package_name="autodl-toolkit", prog_name="autodl")
+@click.version_option(package_name="autodl-cli", prog_name="autodl")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of human-readable output.")
 @click.pass_context
 def main(ctx: click.Context, as_json: bool) -> None:

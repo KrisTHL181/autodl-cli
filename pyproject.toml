@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autodl-toolkit"
+name = "autodl-cli"
 dynamic = ["version"]
 description = "Command-line tooling and a Python SDK for managing AutoDL instances."
 readme = "README.md"
@@ -49,9 +49,9 @@ autodl = "autodl_cli.main:main"
 autodl-mcp = "autodl_cli.mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/KrisTHL181/autodl-toolkit"
-Repository = "https://github.com/KrisTHL181/autodl-toolkit"
-Issues = "https://github.com/KrisTHL181/autodl-toolkit/issues"
+Homepage = "https://github.com/KrisTHL181/autodl-cli"
+Repository = "https://github.com/KrisTHL181/autodl-cli"
+Issues = "https://github.com/KrisTHL181/autodl-cli/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

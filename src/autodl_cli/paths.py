@@ -1,4 +1,4 @@
-"""Location of the per-user autodl-toolkit data directory.
+"""Location of the per-user autodl-cli data directory.
 
 Everything that would otherwise hardcode ``~/.autodl-cli`` derives from
 :func:`autodl_home`, so a test run or sandbox can relocate the whole tree with
@@ -17,7 +17,7 @@ _DEFAULT_DIRNAME = ".autodl-cli"
 
 
 def autodl_home() -> Path:
-    """Return the root of the per-user autodl-toolkit data tree.
+    """Return the root of the per-user autodl-cli data tree.
 
     ``AUTODL_CLI_HOME`` overrides the default when set to a non-empty value;
     a leading ``~`` in the override is expanded. The directory is not created
