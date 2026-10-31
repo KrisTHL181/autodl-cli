@@ -15,6 +15,12 @@ Saving an instance as a custom image posts to
 ``"data": null``, so :func:`save_image` validates only the envelope and returns
 a small record of what it requested.
 
+Powering an instance off posts to ``POST /api/v1/instance/power_off`` with the
+instance UUID in the body. It answers with ``"data": null`` as well, so
+:func:`power_off` follows the same envelope-only validation and record shape.
+Powering an instance off keeps its data; AutoDL releases it after the retention
+window shown by ``instance list`` unless it is powered on again.
+
 TODO: implement the remaining lifecycle handlers and return the structures
 defined in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
@@ -39,6 +45,9 @@ INSTANCE_DETAIL_PATH = "/api/v1/instance/snapshot"
 
 #: Path of the save-as-custom-image endpoint.
 INSTANCE_IMAGE_SAVE_PATH = "/api/v1/instance/image/save"
+
+#: Path of the power-off endpoint.
+INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
@@ -246,11 +255,30 @@ def power_on(client: AutoDLClient, instance_id: str) -> dict[str, object]:
 def power_off(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     """Power an instance off.
 
+    ``POST /api/v1/instance/power_off`` answers with ``"data": null`` on
+    success, so success is signalled by the envelope's ``code`` alone. The data
+    disk is preserved; AutoDL releases a powered-off instance after the
+    retention window unless it is powered on again.
+
     :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
-    :returns: The operation result.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``powered_off``.
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
     """
-    ...
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    body: dict[str, object] = {"instance_uuid": instance_uuid}
+    payload = client.request("POST", INSTANCE_POWER_OFF_PATH, json=body)
+    require_success_any(payload, action="power off instance")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "powered_off": True,
+    }
 
 
 def release_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:

@@ -147,13 +147,16 @@ autodl instance list
 autodl instance list --status running -q 4090
 autodl instance list --unbind-sub-user
 autodl instance detail <instance-uuid>
+autodl instance power-off <instance-uuid>
 autodl instance save-image <instance-uuid> my-image
 autodl instance save-image <instance-uuid> my-image --try-again
 ```
 
-`save-image` posts to `/api/v1/instance/image/save`; AutoDL accepts the request
-immediately, and the image appears under the account's private images once the
-save finishes.
+`power-off` posts to `/api/v1/instance/power_off` and keeps the data disk;
+AutoDL releases a powered-off instance after the retention window shown by
+`instance list` unless it is powered on again. `save-image` posts to
+`/api/v1/instance/image/save`; AutoDL accepts the request immediately, and the
+image appears under the account's private images once the save finishes.
 
 ### 🛠️ API Debugging
 

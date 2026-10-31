@@ -3,8 +3,9 @@
 Code that consumes autodl-cli as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
 handler surface for password login, browser-token lookup, account balance,
-instance listing/details, and the base-image catalogue, and normalises internal
-exceptions into the :class:`~autodl_cli.errors.AutoDLError` hierarchy.
+instance listing/details, instance lifecycle actions, and the base-image
+catalogue, and normalises internal exceptions into the
+:class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ __all__ = [
     "list_instances",
     "list_private_images",
     "login",
+    "power_off",
     "save_image",
 ]
 
@@ -209,6 +211,22 @@ def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.get_instance(client, instance_uuid)
+
+
+def power_off(token: str, instance_uuid: str) -> dict[str, object]:
+    """Power an instance off.
+
+    The data disk is preserved; AutoDL releases a powered-off instance after
+    the retention window unless it is powered on again.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``powered_off``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.power_off(client, instance_uuid)
 
 
 def save_image(
