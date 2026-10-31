@@ -13,6 +13,7 @@ import click
 from autodl_cli.commands.account import register_account
 from autodl_cli.commands.auth import register_auth
 from autodl_cli.commands.config import register_config
+from autodl_cli.commands.gpu import register_gpu
 from autodl_cli.commands.image import register_image
 from autodl_cli.commands.instance import register_instance
 from autodl_cli.commands.nfs import register_nfs
@@ -35,6 +36,7 @@ def main(ctx: click.Context, as_json: bool) -> None:
 register_auth(main)
 register_account(main)
 register_config(main)
+register_gpu(main)
 register_image(main)
 register_instance(main)
 register_nfs(main)

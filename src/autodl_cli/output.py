@@ -587,7 +587,7 @@ def render_regions(regions: Sequence[dict[str, object]]) -> None:
     ``--json`` callers receive the complete handler result instead.
 
     :param regions: Mappings returned by
-        :func:`autodl_cli.handlers.instance.list_regions`.
+        :func:`autodl_cli.handlers.gpu.list_regions`.
     """
     if not regions:
         console.print("No regions found.")
@@ -617,7 +617,7 @@ def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
     result instead.
 
     :param regions: Mappings returned by
-        :func:`autodl_cli.handlers.instance.list_gpu_availability`.
+        :func:`autodl_cli.handlers.gpu.list_gpu_availability`.
     """
     if not regions:
         console.print("No GPU availability found.")
@@ -645,6 +645,37 @@ def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
                 _format_value(gpu.get("total_gpu_num")),
                 _format_value(gpu.get("chip_corp")),
             )
+    console.print(table)
+
+
+def render_gpu_matches(matches: Sequence[dict[str, object]]) -> None:
+    """Render a flat GPU search result as a Rich table.
+
+    Each match already names its region, so the region is a column rather than
+    a section heading. ``--json`` callers receive the complete handler result
+    instead.
+
+    :param matches: Mappings returned by
+        :func:`autodl_cli.handlers.gpu.find_gpu`.
+    """
+    if not matches:
+        console.print("No matching GPUs found.")
+        return
+
+    table = Table(title=f"Matching GPUs ({len(matches)})")
+    table.add_column("Region")
+    table.add_column("GPU")
+    table.add_column("Idle", justify="right")
+    table.add_column("Total", justify="right")
+    table.add_column("Chip")
+    for gpu in matches:
+        table.add_row(
+            _format_value(gpu.get("region_name")),
+            _format_value(gpu.get("gpu_type")),
+            _format_value(gpu.get("idle_gpu_num")),
+            _format_value(gpu.get("total_gpu_num")),
+            _format_value(gpu.get("chip_corp")),
+        )
     console.print(table)
 
 

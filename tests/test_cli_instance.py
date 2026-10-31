@@ -247,6 +247,8 @@ def test_list_forwards_filters_and_page_size(home: Path, monkeypatch) -> None:
             "--sub-name",
             "alice",
             "--unbind-sub-user",
+            "--query",
+            "trainer",
             "--page-size",
             "25",
         ],
@@ -259,7 +261,25 @@ def test_list_forwards_filters_and_page_size(home: Path, monkeypatch) -> None:
         "charge_types": ("payg",),
         "sub_name": "alice",
         "unbind_sub_user": True,
+        "query": "trainer",
     }
+
+
+def test_list_query_short_option_is_forwarded(home: Path, monkeypatch) -> None:
+    """``-q`` is an alias for ``--query`` and reaches the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_list_instances(client, **kwargs):
+        captured.update(kwargs)
+        return INSTANCES
+
+    monkeypatch.setattr(instance_commands.instance_handler, "list_instances", fake_list_instances)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "list", "-q", "4090"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["query"] == "4090"
 
 
 def test_list_requires_token(home: Path, monkeypatch) -> None:
@@ -306,204 +326,3 @@ def test_list_rejects_page_size_above_server_limit(home: Path, monkeypatch) -> N
 
     assert result.exit_code == 2
     assert "101" in result.output
-
-
-GPU_REGIONS = [
-    {
-        "data_center": "westDC3",
-        "region_name": "西北B区",
-        "region_signs": ["west-B", "west-C", "west-D", "west-E"],
-        "visible": "all",
-        "used_for": "all",
-    },
-    {
-        "data_center": "foshanDC1",
-        "region_name": "佛山区",
-        "region_signs": ["foshan-A"],
-        "visible": "all",
-        "used_for": "all",
-    },
-]
-
-GPU_AVAILABILITY = [
-    {
-        "data_center": "westDC3",
-        "region_name": "西北B区",
-        "region_signs": ["west-B", "west-C", "west-D", "west-E"],
-        "gpus": [
-            {
-                "region_name": "西北B区",
-                "data_center": "westDC3",
-                "region_signs": ["west-B", "west-C", "west-D", "west-E"],
-                "gpu_type": "A100",
-                "total_gpu_num": 80,
-                "idle_gpu_num": 5,
-                "chip_corp": "nvidia",
-                "cpu_arch": "x86",
-            },
-            {
-                "region_name": "西北B区",
-                "data_center": "westDC3",
-                "region_signs": ["west-B", "west-C", "west-D", "west-E"],
-                "gpu_type": "RTX 4090",
-                "total_gpu_num": 735,
-                "idle_gpu_num": 1,
-                "chip_corp": "nvidia",
-                "cpu_arch": "x86",
-            },
-        ],
-    },
-    {
-        "data_center": "foshanDC1",
-        "region_name": "佛山区",
-        "region_signs": ["foshan-A"],
-        "gpus": [],
-    },
-]
-
-
-def _patch_gpu_handler(monkeypatch, captured: dict[str, object]) -> None:
-    """Replace the GPU handlers with offline fakes.
-
-    :param monkeypatch: pytest's monkeypatch fixture.
-    :param captured: Mapping filled with the arguments the command forwards.
-    """
-
-    def fake_list_gpu_availability(client, regions, *, available_only=False):
-        captured["regions"] = regions
-        captured["available_only"] = available_only
-        return GPU_AVAILABILITY
-
-    monkeypatch.setattr(instance_commands.instance_handler, "list_regions", lambda client: GPU_REGIONS)
-    monkeypatch.setattr(instance_commands.instance_handler, "list_gpu_availability", fake_list_gpu_availability)
-
-
-def test_gpu_without_region_lists_available_regions(home: Path, monkeypatch) -> None:
-    """Omitting ``--region`` prints the catalogue without querying GPU stock."""
-    _seed_token()
-    monkeypatch.setattr(instance_commands.instance_handler, "list_regions", lambda client: GPU_REGIONS)
-    monkeypatch.setattr(
-        instance_commands.instance_handler,
-        "list_gpu_availability",
-        lambda *args, **kwargs: pytest.fail("the GPU endpoint must not run without --region"),
-    )
-    monkeypatch.setattr(output_module, "console", Console(width=120))
-
-    result = CliRunner().invoke(main, ["instance", "gpu"])
-
-    assert result.exit_code == 0, result.output
-    assert "Available regions" in result.output
-    assert "西北B区" in result.output
-    assert "westDC3" in result.output
-    assert "west-B, west-C, west-D, west-E" in result.output
-    assert "佛山区" in result.output
-    assert "Pick a sign from the Signs column and pass it to -r/--region." in result.output
-    assert TOKEN not in result.output
-
-
-def test_gpu_without_region_json_returns_region_catalogue(home: Path, monkeypatch) -> None:
-    """``--json`` without ``--region`` emits the grouped region catalogue."""
-    _seed_token()
-    monkeypatch.setattr(instance_commands.instance_handler, "list_regions", lambda client: GPU_REGIONS)
-    monkeypatch.setattr(
-        instance_commands.instance_handler,
-        "list_gpu_availability",
-        lambda *args, **kwargs: pytest.fail("the GPU endpoint must not run without --region"),
-    )
-
-    result = CliRunner().invoke(main, ["--json", "instance", "gpu"])
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == GPU_REGIONS
-
-
-def test_gpu_json_forwards_selection_and_returns_raw_result(home: Path, monkeypatch) -> None:
-    """``--json`` emits the handler result and forwards identifiers and flags."""
-    _seed_token()
-    captured: dict[str, object] = {}
-    _patch_gpu_handler(monkeypatch, captured)
-
-    result = CliRunner().invoke(
-        main,
-        ["--json", "instance", "gpu", "-r", "west-B", "-r", "佛山区", "--available"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == GPU_AVAILABILITY
-    assert [region["data_center"] for region in captured["regions"]] == ["westDC3", "foshanDC1"]
-    assert captured["available_only"] is True
-    assert TOKEN not in result.output
-
-
-def test_gpu_human_output_shows_table(home: Path, monkeypatch) -> None:
-    """The human view shows every column and a dash row for an empty region."""
-    _seed_token()
-    captured: dict[str, object] = {}
-    _patch_gpu_handler(monkeypatch, captured)
-    monkeypatch.setattr(output_module, "console", Console(width=120))
-
-    result = CliRunner().invoke(main, ["instance", "gpu", "-r", "west-B", "-r", "foshan-A"])
-
-    assert result.exit_code == 0, result.output
-    assert "GPU availability" in result.output
-    for header in ("Region", "GPU", "Idle", "Total", "Chip"):
-        assert header in result.output
-    assert "西北B区" in result.output
-    assert "A100" in result.output
-    assert "RTX 4090" in result.output
-    assert "5" in result.output
-    assert "735" in result.output
-    assert "nvidia" in result.output
-    assert "佛山区" in result.output
-    empty_region_line = next(line for line in result.output.splitlines() if "佛山区" in line)
-    assert empty_region_line.count("-") >= 4
-    assert TOKEN not in result.output
-
-
-def test_gpu_unknown_region_is_a_clean_error(home: Path, monkeypatch) -> None:
-    """An unknown identifier exits 1 and lists the known regions."""
-    _seed_token()
-    monkeypatch.setattr(instance_commands.instance_handler, "list_regions", lambda client: GPU_REGIONS)
-    monkeypatch.setattr(
-        instance_commands.instance_handler,
-        "list_gpu_availability",
-        lambda *args, **kwargs: pytest.fail("the GPU endpoint must not run for an unknown region"),
-    )
-
-    result = CliRunner().invoke(main, ["instance", "gpu", "-r", "nowhere"])
-
-    assert result.exit_code == 1
-    assert "Known regions" in result.output
-    assert "西北B区 (west-B, west-C, west-D, west-E)" in result.output
-    assert "Traceback" not in result.output
-
-
-def test_gpu_requires_token(home: Path, monkeypatch) -> None:
-    """A missing token fails cleanly with the paste hint."""
-    monkeypatch.setattr(
-        instance_commands.instance_handler,
-        "list_regions",
-        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
-    )
-
-    result = CliRunner().invoke(main, ["instance", "gpu", "-r", "west-B"])
-
-    assert result.exit_code == 1
-    assert "autodl auth paste" in result.output
-    assert "Traceback" not in result.output
-
-
-def test_gpu_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
-    """An API failure exits 1 without a traceback."""
-    _seed_token()
-
-    def failing_list_regions(client):
-        raise AuthError("token expired")
-
-    monkeypatch.setattr(instance_commands.instance_handler, "list_regions", failing_list_regions)
-
-    result = CliRunner().invoke(main, ["instance", "gpu", "-r", "west-B"])
-
-    assert result.exit_code == 1
-    assert "token expired" in result.output
-    assert "Traceback" not in result.output

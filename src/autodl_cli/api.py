@@ -71,11 +71,16 @@ def list_instances(
     charge_types: Iterable[str] = (),
     sub_name: str = "",
     unbind_sub_user: bool = False,
+    query: str = "",
 ) -> list[dict[str, object]]:
     """Return every instance visible to an API token.
 
     Every page is fetched, so the result is not limited by AutoDL's
     per-request page size.
+
+    ``query`` is applied locally, after every page has been fetched, because
+    the API has no keyword field. It matches case-insensitively against the
+    instance UUID, name, region, machine alias, and GPU name fields.
 
     :param token: AutoDL API token, typically copied from a browser session.
     :param page_size: Instances requested per API call; must be positive.
@@ -83,6 +88,8 @@ def list_instances(
     :param charge_types: Only return instances with one of these billing modes.
     :param sub_name: Only return instances whose bound sub-user name matches.
     :param unbind_sub_user: Only return instances with no bound sub-user.
+    :param query: Only return instances matching this text; empty means no
+        filtering.
     :returns: One mapping per instance.
     :raises autodl_cli.errors.AutoDLError: For every authentication or API
         failure.
@@ -95,6 +102,7 @@ def list_instances(
             charge_types=charge_types,
             sub_name=sub_name,
             unbind_sub_user=unbind_sub_user,
+            query=query,
         )
 
 
