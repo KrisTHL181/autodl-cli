@@ -6,6 +6,8 @@ normalisation or token handling.
 
 from __future__ import annotations
 
+import click
+
 
 def parse_instance_id(value: str) -> str:
     """Normalise an instance identifier from the command line.
@@ -24,4 +26,7 @@ def require_token(config: dict[str, object]) -> str:
     :returns: The API token.
     :raises click.ClickException: When no token is configured.
     """
-    ...
+    token = config.get("token")
+    if isinstance(token, str) and token:
+        return token
+    raise click.ClickException("Not authenticated. Run `autodl auth paste` first.")

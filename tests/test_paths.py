@@ -1,15 +1,10 @@
-"""Tests for :mod:`autodl_cli.paths` and the ``AUTODL_CLI_HOME`` override.
-
-TODO: once :func:`autodl_cli.paths.autodl_home` is implemented, fill in the
-default-directory, override, ``~`` expansion, and empty-value fallback cases
-that ``zhihu-cli`` keeps in its ``test_paths.py``.
-"""
+"""Tests for :mod:`autodl_cli.paths` and the ``AUTODL_CLI_HOME`` override."""
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
-from autodl_cli.paths import HOME_ENV
+from autodl_cli.paths import HOME_ENV, autodl_home
 
 
 def test_home_env_name() -> None:
@@ -17,11 +12,34 @@ def test_home_env_name() -> None:
     assert HOME_ENV == "AUTODL_CLI_HOME"
 
 
-@pytest.mark.skip(reason="TODO: paths.autodl_home() is not implemented yet")
-def test_default_home() -> None:
+def test_default_home(monkeypatch, tmp_path: Path) -> None:
     """Without the override the directory is ``$HOME/.autodl-cli``."""
+    monkeypatch.delenv(HOME_ENV, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert autodl_home() == tmp_path / ".autodl-cli"
+    assert not (tmp_path / ".autodl-cli").exists()
 
 
-@pytest.mark.skip(reason="TODO: paths.autodl_home() is not implemented yet")
-def test_override() -> None:
+def test_override(monkeypatch, tmp_path: Path) -> None:
     """A non-empty override is returned verbatim."""
+    target = tmp_path / "custom-data"
+    monkeypatch.setenv(HOME_ENV, str(target))
+
+    assert autodl_home() == target
+
+
+def test_override_expands_user(monkeypatch, tmp_path: Path) -> None:
+    """A leading ``~`` in the override is expanded."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(HOME_ENV, "~/sandbox")
+
+    assert autodl_home() == tmp_path / "sandbox"
+
+
+def test_empty_override_falls_back(monkeypatch, tmp_path: Path) -> None:
+    """An empty override behaves as though it were unset."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(HOME_ENV, "")
+
+    assert autodl_home() == tmp_path / ".autodl-cli"

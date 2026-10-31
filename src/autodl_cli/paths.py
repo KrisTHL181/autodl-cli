@@ -3,14 +3,11 @@
 Everything that would otherwise hardcode ``~/.autodl-cli`` derives from
 :func:`autodl_home`, so a test run or sandbox can relocate the whole tree with
 one environment variable.
-
-TODO: implement :func:`autodl_home` with the same contract as
-``zhihu_cli.paths.zhihu_home`` — non-empty override wins, ``~`` is expanded,
-and the directory is not created.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 HOME_ENV = "AUTODL_CLI_HOME"
@@ -28,4 +25,7 @@ def autodl_home() -> Path:
 
     :returns: The configured data directory, or ``~/.autodl-cli``.
     """
-    ...
+    override = os.environ.get(HOME_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / _DEFAULT_DIRNAME
