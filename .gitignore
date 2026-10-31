@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+.DS_Store
+
+# pytest live-suite sandbox (AUTODL_CLI_HOME is redirected by tests/conftest.py)
+tests/.state/
+
+# runtime caches and local drafts
+.cache/
+(draft)*
+*.swp
+
+# local Claude Code instructions
+/CLAUDE.md
