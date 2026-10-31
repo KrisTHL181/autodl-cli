@@ -579,6 +579,75 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
     console.print(table)
 
 
+def render_regions(regions: Sequence[dict[str, object]]) -> None:
+    """Render the region catalogue as a Rich table.
+
+    The signs column lists every region sign grouped under the data center, so
+    any of them can be passed to ``--region``; a trailing hint says so.
+    ``--json`` callers receive the complete handler result instead.
+
+    :param regions: Mappings returned by
+        :func:`autodl_cli.handlers.instance.list_regions`.
+    """
+    if not regions:
+        console.print("No regions found.")
+        return
+
+    table = Table(title="Available regions")
+    table.add_column("Region")
+    table.add_column("Data center")
+    table.add_column("Signs")
+    for region in regions:
+        signs = region.get("region_signs")
+        sign_text = ", ".join(sign for sign in signs if isinstance(sign, str)) if isinstance(signs, list) else ""
+        table.add_row(
+            _format_value(region.get("region_name")),
+            _format_value(region.get("data_center")),
+            _format_value(sign_text),
+        )
+    console.print(table)
+    console.print("Pick a sign from the Signs column and pass it to -r/--region.", style="dim")
+
+
+def render_gpu_availability(regions: Sequence[dict[str, object]]) -> None:
+    """Render GPU availability by region as a Rich table.
+
+    A region with no GPU types still gets a row, with ``"-"`` in every column
+    after the region name. ``--json`` callers receive the complete handler
+    result instead.
+
+    :param regions: Mappings returned by
+        :func:`autodl_cli.handlers.instance.list_gpu_availability`.
+    """
+    if not regions:
+        console.print("No GPU availability found.")
+        return
+
+    table = Table(title="GPU availability")
+    table.add_column("Region")
+    table.add_column("GPU")
+    table.add_column("Idle", justify="right")
+    table.add_column("Total", justify="right")
+    table.add_column("Chip")
+    for region in regions:
+        region_name = _format_value(region.get("region_name"))
+        gpus = region.get("gpus")
+        if not isinstance(gpus, list) or not gpus:
+            table.add_row(region_name, "-", "-", "-", "-")
+            continue
+        for gpu in gpus:
+            if not isinstance(gpu, dict):
+                continue
+            table.add_row(
+                region_name,
+                _format_value(gpu.get("gpu_type")),
+                _format_value(gpu.get("idle_gpu_num")),
+                _format_value(gpu.get("total_gpu_num")),
+                _format_value(gpu.get("chip_corp")),
+            )
+    console.print(table)
+
+
 def success(message: str) -> None:
     """Print a success message.
 

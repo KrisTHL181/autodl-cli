@@ -1,6 +1,8 @@
 """``autodl instance`` — instance lifecycle commands.
 
-``list`` is implemented against ``POST /api/v1/instance``; the remaining
+``list`` is implemented against ``POST /api/v1/instance`` and ``gpu`` against
+``POST /api/v1/machine/region/gpu_type``; without ``--region``, ``gpu`` lists
+the region catalogue from ``GET /api/v1/common`` instead. The remaining
 lifecycle commands wait for their handlers.
 """
 
@@ -86,6 +88,71 @@ def list_command(
         return
 
     output.render_instances(instances)
+
+
+@instance.command("gpu", help="Show GPU availability in one or more regions.")
+@click.option(
+    "--region",
+    "-r",
+    "region_values",
+    multiple=True,
+    metavar="REGION",
+    help="Region sign, data center, or name (repeatable); omit to list the available regions.",
+)
+@click.option(
+    "--available",
+    "-a",
+    is_flag=True,
+    help="Only show GPU types with idle capacity.",
+)
+@click.pass_context
+def gpu_command(
+    ctx: click.Context,
+    region_values: tuple[str, ...],
+    available: bool,
+) -> None:
+    """Show GPU availability in one or more regions.
+
+    Without ``--region`` the command only prints the region catalogue, so the
+    valid identifiers can be discovered before spending a request per region.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param region_values: Region signs, data centers, or names to query; empty
+        means list the available regions instead of querying stock.
+    :param available: Whether to drop GPU types with no idle capacity.
+    :raises click.ClickException: When an identifier is unknown, no token is
+        configured, or the API call fails.
+    """
+    token = require_token(load_config())
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    try:
+        with AutoDLClient(token) as client:
+            regions = instance_handler.list_regions(client)
+            if not region_values:
+                if as_json:
+                    output.render_json(regions)
+                else:
+                    output.render_regions(regions)
+                return
+
+            try:
+                selected = instance_handler.select_regions(regions, region_values)
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from exc
+            availability = instance_handler.list_gpu_availability(
+                client,
+                selected,
+                available_only=available,
+            )
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        output.render_json(availability)
+        return
+
+    output.render_gpu_availability(availability)
 
 
 def register_instance(main_group: click.Group) -> click.Group:

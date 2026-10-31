@@ -16,6 +16,38 @@ from autodl_cli.errors import APIError, AuthError, AutoDLError
 _AUTH_ERROR_CODES = frozenset({"AuthorizeFailed", "AuthError", "LoginRequired", "TokenExpired"})
 
 
+def _unwrap(
+    payload: dict[str, object],
+    *,
+    action: str,
+    error_type: type[AutoDLError] | None = None,
+) -> object:
+    """Validate an API envelope and return its raw ``data`` value.
+
+    :param payload: Decoded API response.
+    :param action: Human-readable step name used in error messages.
+    :param error_type: Exception class raised for a non-``Success`` code. When
+        ``None``, auth-related codes raise :class:`AuthError` and every other
+        failure raises :class:`APIError`.
+    :returns: The ``data`` value, without checking its type.
+    :raises autodl_cli.errors.AutoDLError: When ``code`` is not ``"Success"``.
+    """
+    code = payload.get("code")
+    if code == "Success":
+        return payload.get("data")
+
+    message = payload.get("msg")
+    if not isinstance(message, str) or not message:
+        message = f"AutoDL {action} failed"
+    request_id = payload.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        message = f"{message} (request_id: {request_id})"
+
+    if error_type is None:
+        error_type = AuthError if isinstance(code, str) and code in _AUTH_ERROR_CODES else APIError
+    raise error_type(message)
+
+
 def require_success(
     payload: dict[str, object],
     *,
@@ -34,20 +66,31 @@ def require_success(
     :raises autodl_cli.errors.APIError: When a successful response has no
         object-valued ``data`` field.
     """
-    code = payload.get("code")
-    if code == "Success":
-        data = payload.get("data")
-        if isinstance(data, dict):
-            return data
-        raise APIError(f"AutoDL {action} returned malformed data")
+    data = _unwrap(payload, action=action, error_type=error_type)
+    if isinstance(data, dict):
+        return data
+    raise APIError(f"AutoDL {action} returned malformed data")
 
-    message = payload.get("msg")
-    if not isinstance(message, str) or not message:
-        message = f"AutoDL {action} failed"
-    request_id = payload.get("request_id")
-    if isinstance(request_id, str) and request_id:
-        message = f"{message} (request_id: {request_id})"
 
-    if error_type is None:
-        error_type = AuthError if isinstance(code, str) and code in _AUTH_ERROR_CODES else APIError
-    raise error_type(message)
+def require_success_list(
+    payload: dict[str, object],
+    *,
+    action: str,
+    error_type: type[AutoDLError] | None = None,
+) -> list[object]:
+    """Validate an API envelope and return its ``data`` array.
+
+    :param payload: Decoded API response.
+    :param action: Human-readable step name used in error messages.
+    :param error_type: Exception class raised for a non-``Success`` code. When
+        ``None``, auth-related codes raise :class:`AuthError` and every other
+        failure raises :class:`APIError`.
+    :returns: The ``data`` list.
+    :raises autodl_cli.errors.AutoDLError: When ``code`` is not ``"Success"``.
+    :raises autodl_cli.errors.APIError: When a successful response has no
+        list-valued ``data`` field.
+    """
+    data = _unwrap(payload, action=action, error_type=error_type)
+    if isinstance(data, list):
+        return data
+    raise APIError(f"AutoDL {action} returned malformed data")
