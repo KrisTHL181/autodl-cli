@@ -3,7 +3,8 @@
 ``list`` flattens the option tree served by ``POST /api/v1/image/all`` into one
 row per selectable base image. Every filter is a case-insensitive substring
 match, so ``--framework torch`` finds PyTorch and ``--cuda 12`` finds every
-12.x toolkit.
+12.x toolkit. ``list-private`` shows the images saved from this account's
+instances, reading ``POST /api/v1/image/private/list`` page by page.
 """
 
 from __future__ import annotations
@@ -117,6 +118,45 @@ def list_command(
         return
 
     output.render_images(images)
+
+
+@image.command("list-private", help="List the private images saved from your instances.")
+@click.option(
+    "--page-size",
+    default=image_handler.DEFAULT_PRIVATE_PAGE_SIZE,
+    show_default=True,
+    type=click.IntRange(min=1, max=image_handler.MAX_PRIVATE_PAGE_SIZE),
+    help="Images requested per API call; every page is fetched.",
+)
+@click.pass_context
+def list_private_command(ctx: click.Context, page_size: int) -> None:
+    """List the private images saved from this account's instances.
+
+    Each image reports its save status and progress, size, framework, and the
+    UUID to use when ordering. Every page is fetched, so the result is not
+    limited by AutoDL's per-request page size.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param page_size: Images requested per API call.
+    :raises click.ClickException: When no token is configured or the API call
+        fails.
+    """
+    token = require_token(load_config())
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    try:
+        with AutoDLClient(token) as client:
+            images = image_handler.list_private_images(client, page_size=page_size)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        output.render_json(images)
+        return
+
+    output.render_private_images(images)
 
 
 def register_image(main_group: click.Group) -> click.Group:

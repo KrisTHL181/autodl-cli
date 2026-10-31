@@ -222,3 +222,171 @@ def test_image_list_api_failure_is_a_clean_click_exception(home: Path, monkeypat
     assert result.exit_code == 1
     assert "token expired" in result.output
     assert "Traceback" not in result.output
+
+
+#: Sanitised private-image entries: one finished and one still saving.
+PRIVATE_IMAGES = [
+    {
+        "id": 842525,
+        "created_at": "2026-11-01T02:46:47+08:00",
+        "image_uuid": "image-40c7c7115c",
+        "instance_uuid": "mamykqv3ku-87936de3",
+        "name": "save-image-test",
+        "image_size": 1021552640,
+        "progress_content": {"oss_file_size": 373865271, "progress": 100, "error": ""},
+        "status": "finished",
+        "framework": "PyTorch:2.12.1",
+        "python_v": "3.12(ubuntu22.04)",
+        "cuda_v": "13.0",
+        "image_source": "private",
+    },
+    {
+        "id": 842524,
+        "created_at": "2026-11-01T02:45:00+08:00",
+        "image_uuid": "image-11aa22bb33",
+        "instance_uuid": "wn8vt448yq-473b14de",
+        "name": "trainer-snapshot",
+        "image_size": 0,
+        "progress_content": {"oss_file_size": 157286400, "progress": 42, "error": ""},
+        "status": "saving",
+        "framework": "TensorFlow:2.9.0",
+        "python_v": "3.8(ubuntu20.04)",
+        "cuda_v": "11.2",
+        "image_source": "private",
+    },
+]
+
+
+def _patch_private_handler(
+    monkeypatch,
+    captured: dict[str, object],
+    images: list[dict[str, object]] | None = None,
+) -> None:
+    """Replace the private-image handler with an offline fake.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    :param captured: Mapping filled with the arguments the command forwards.
+    :param images: Result to return; defaults to :data:`PRIVATE_IMAGES`.
+    """
+
+    def fake_list_private_images(client, *, page_size):
+        captured["page_size"] = page_size
+        return PRIVATE_IMAGES if images is None else images
+
+    monkeypatch.setattr(image_commands.image_handler, "list_private_images", fake_list_private_images)
+
+
+def test_list_private_human_output_shows_table(home: Path, monkeypatch) -> None:
+    """The wide table shows status, progress, spec, size, time, and UUID."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_private_handler(monkeypatch, captured)
+    monkeypatch.setattr(output_module, "console", Console(width=160))
+
+    result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 0, result.output
+    assert "Private images (2)" in result.output
+    for header in ("Name", "Status", "Image", "Size", "Created", "UUID"):
+        assert header in result.output
+    assert "save-image-test" in result.output
+    assert "finished" in result.output
+    assert "1G" in result.output
+    assert "PyTorch 2.12.1" in result.output
+    assert "3.12(ubuntu22.04)" in result.output
+    assert "13.0" in result.output
+    assert "image-40c7c7115c" in result.output
+    assert "2026-11-01" in result.output
+    assert "02:46:47" in result.output
+    assert "trainer-snapshot" in result.output
+    assert "saving" in result.output
+    assert "42%" in result.output
+    assert TOKEN not in result.output
+
+
+def test_list_private_stacks_fields_on_a_narrow_terminal(home: Path, monkeypatch) -> None:
+    """A narrow terminal gets the stacked details instead of a truncated table."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_private_handler(monkeypatch, captured)
+    monkeypatch.setattr(output_module, "console", Console(width=60))
+
+    result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 0, result.output
+    assert "Details" in result.output
+    assert "save-image-test" in result.output
+    assert "finished · 1G · 2026-11-01 02:46:47" in result.output
+    assert "PyTorch 2.12.1 · 3.12(ubuntu22.04) · CUDA 13.0" in result.output
+    assert "image-40c7c7115c" in result.output
+    assert "saving · 42%" in result.output
+    assert TOKEN not in result.output
+
+
+def test_list_private_json_returns_the_handler_result(home: Path, monkeypatch) -> None:
+    """``--json`` emits the API's entries untouched."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_private_handler(monkeypatch, captured)
+
+    result = CliRunner().invoke(main, ["--json", "image", "list-private"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == PRIVATE_IMAGES
+    assert TOKEN not in result.output
+
+
+def test_list_private_forwards_page_size(home: Path, monkeypatch) -> None:
+    """The ``--page-size`` option reaches the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_private_handler(monkeypatch, captured)
+
+    result = CliRunner().invoke(main, ["--json", "image", "list-private", "--page-size", "20"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"page_size": 20}
+
+
+def test_list_private_no_images_reports_cleanly(home: Path, monkeypatch) -> None:
+    """An empty account prints a hint instead of an empty table."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_private_handler(monkeypatch, captured, images=[])
+
+    result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 0, result.output
+    assert "No private images found." in result.output
+    assert "Private images" not in result.output
+
+
+def test_list_private_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        image_commands.image_handler,
+        "list_private_images",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_list_private_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_list_private_images(client, *, page_size):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(image_commands.image_handler, "list_private_images", failing_list_private_images)
+
+    result = CliRunner().invoke(main, ["image", "list-private"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output

@@ -5,6 +5,10 @@ four-level option tree: framework, framework version, Python/OS, and CUDA
 version. Only the last level carries a base-image UUID, so :func:`list_images`
 flattens the tree into one record per selectable image while keeping the order
 the API reports.
+
+The account's own saved images live behind
+``POST /api/v1/image/private/list``, a paged endpoint like the instance list.
+:func:`list_private_images` walks every page and returns the entries unchanged.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
-from autodl_cli.handlers._common import require_success_list
+from autodl_cli.handlers._common import require_success, require_success_list
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -21,6 +25,15 @@ if TYPE_CHECKING:
 
 #: Path of the public base-image catalogue endpoint.
 IMAGE_ALL_PATH = "/api/v1/image/all"
+
+#: Path of the account's private-image list endpoint.
+PRIVATE_IMAGE_LIST_PATH = "/api/v1/image/private/list"
+
+#: Number of private images requested per API call when the caller does not choose.
+DEFAULT_PRIVATE_PAGE_SIZE = 100
+
+#: Largest page size accepted by the private-image listing.
+MAX_PRIVATE_PAGE_SIZE = 100
 
 _MALFORMED = "AutoDL image list returned malformed data"
 
@@ -218,6 +231,84 @@ def list_images(
         and _matches(image["chip_corp"], wanted_chips)
         and _matches(image["cpu_arch"], wanted_archs)
     ]
+
+
+def _fetch_private_page(
+    client: AutoDLClient,
+    *,
+    page_index: int,
+    page_size: int,
+) -> tuple[list[dict[str, object]], int]:
+    """Fetch one page of the private-image list.
+
+    :param client: Authenticated API client.
+    :param page_index: One-based page number to request.
+    :param page_size: Images to request for this page.
+    :returns: The page's image mappings and the total number of pages.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
+    """
+    body: dict[str, object] = {
+        "order_uuid": "",
+        "date_from": "",
+        "date_to": "",
+        "page_index": page_index,
+        "page_size": page_size,
+    }
+    payload = client.request("POST", PRIVATE_IMAGE_LIST_PATH, json=body)
+    data = require_success(payload, action="private image list")
+
+    entries = data.get("list")
+    if not isinstance(entries, list):
+        raise APIError("AutoDL private image list returned malformed data")
+
+    images: list[dict[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise APIError("AutoDL private image list returned a non-object entry")
+        images.append(entry)
+
+    # A missing or non-integer max_page means the server did not say how many
+    # pages exist; stop after this one rather than risk looping forever.
+    max_page = data.get("max_page")
+    if not isinstance(max_page, int) or isinstance(max_page, bool):
+        max_page = page_index
+
+    return images, max_page
+
+
+def list_private_images(
+    client: AutoDLClient,
+    *,
+    page_size: int = DEFAULT_PRIVATE_PAGE_SIZE,
+) -> list[dict[str, object]]:
+    """Return the images saved from this account's instances.
+
+    Every page is fetched, so the result is not limited by the per-request page
+    size. The API's entries are returned unchanged, preserving the save status,
+    progress, size, and source-instance metadata for callers.
+
+    :param client: Authenticated API client.
+    :param page_size: Images requested per API call; must be positive.
+    :returns: One mapping per private image, newest first as the API reports.
+    :raises ValueError: When ``page_size`` is not positive.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
+    """
+    if page_size < 1:
+        raise ValueError("page_size must be at least 1")
+
+    images: list[dict[str, object]] = []
+    page_index = 1
+    while True:
+        entries, max_page = _fetch_private_page(client, page_index=page_index, page_size=page_size)
+        images.extend(entries)
+        if not entries or page_index >= max_page:
+            break
+        page_index += 1
+    return images
 
 
 def get_create_options(client: AutoDLClient) -> dict[str, object]:

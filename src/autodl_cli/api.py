@@ -27,6 +27,7 @@ __all__ = [
     "get_instance",
     "list_images",
     "list_instances",
+    "list_private_images",
     "login",
     "save_image",
 ]
@@ -112,6 +113,26 @@ def list_images(
             chip_corps=chip_corps,
             cpu_archs=cpu_archs,
         )
+
+
+def list_private_images(
+    token: str,
+    *,
+    page_size: int = image_handler.DEFAULT_PRIVATE_PAGE_SIZE,
+) -> list[dict[str, object]]:
+    """Return the images saved from this account's instances.
+
+    Every page is fetched, so the result is not limited by AutoDL's per-request
+    page size. The API's entries are returned unchanged.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param page_size: Images requested per API call; must be positive.
+    :returns: One mapping per private image.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return image_handler.list_private_images(client, page_size=page_size)
 
 
 def list_instances(

@@ -69,9 +69,11 @@ def _status_style(value: object) -> str:
         for failures, and cyan otherwise.
     """
     text = str(value).lower()
-    if text.startswith(("normal", "healthy", "ok", "running")):
+    if text.startswith(("normal", "healthy", "ok", "running", "finished", "success")):
         return _STYLE_OK
-    if text.startswith(("shutdown", "stopped", "starting", "stopping", "pending")):
+    if text.startswith(
+        ("shutdown", "stopped", "starting", "stopping", "pending", "saving", "uploading", "processing", "creating")
+    ):
         return _STYLE_WARN
     if text.startswith(("error", "failed", "released", "due", "exception", "oom")):
         return _STYLE_ERR
@@ -1358,6 +1360,208 @@ def render_images(images: Sequence[dict[str, object]]) -> None:
     table = _table(f"Base images ({len(images)})")
     for header in _IMAGE_HEADERS:
         table.add_column(header, justify="right" if header == "CUDA" else "left")
+    for row in rows:
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def _format_private_framework(image: Mapping[str, object]) -> str:
+    """Format a private image's ``framework`` field.
+
+    The API joins the name and version with a colon (``PyTorch:2.12.1``); the
+    table shows the same space-separated form as the base-image catalogue.
+
+    :param image: One mapping returned by
+        :func:`autodl_cli.handlers.image.list_private_images`.
+    :returns: ``"PyTorch 2.12.1"``, the untouched value when it has no colon,
+        or ``"-"`` when the field is missing.
+    """
+    framework = image.get("framework")
+    if not isinstance(framework, str) or not framework:
+        return "-"
+    name, separator, version = framework.partition(":")
+    if separator and name and version:
+        return f"{name} {version}"
+    return framework
+
+
+def _private_progress(image: Mapping[str, object]) -> tuple[int | None, str]:
+    """Read a private image's save progress and error text.
+
+    :param image: One private-image mapping.
+    :returns: The percentage (``None`` when not reported) and the error text
+        (empty when there is none).
+    """
+    progress = image.get("progress_content")
+    if not isinstance(progress, dict):
+        return None, ""
+    value = progress.get("progress")
+    percent = value if isinstance(value, int) and not isinstance(value, bool) else None
+    error = progress.get("error")
+    return percent, error if isinstance(error, str) else ""
+
+
+def _private_status_cell(image: Mapping[str, object]) -> Text:
+    """Build the status cell for a private image.
+
+    :param image: One private-image mapping.
+    :returns: The status coloured by save state, with the error in red or the
+        progress percentage in magenta on a second line while saving.
+    """
+    status = image.get("status")
+    text = Text(_format_value(status), style=_status_style(status))
+    percent, error = _private_progress(image)
+    if error:
+        text.append("\n")
+        text.append(error, style=_STYLE_ERR)
+    elif percent is not None and status != "finished":
+        text.append("\n")
+        text.append(f"{percent}%", style=_STYLE_NUM)
+    return text
+
+
+def _private_spec_cell(image: Mapping[str, object]) -> Text:
+    """Build the framework/Python/CUDA cell for a private image.
+
+    :param image: One private-image mapping.
+    :returns: The framework in bold with the Python/OS and CUDA versions on a
+        second line.
+    """
+    text = Text(_format_private_framework(image), style=_STYLE_LABEL)
+    python_version = _format_value(image.get("python_v"))
+    cuda_version = _format_value(image.get("cuda_v"))
+    if python_version != "-" or cuda_version != "-":
+        text.append("\n")
+        text.append(python_version, style=_STYLE_COLUMN)
+        if cuda_version != "-":
+            text.append(" · CUDA ", style=_STYLE_META)
+            text.append(cuda_version, style=_STYLE_NUM)
+    return text
+
+
+def _private_created_cell(image: Mapping[str, object]) -> Text:
+    """Build the creation-time cell for a private image.
+
+    :param image: One private-image mapping.
+    :returns: The date in cyan with the time dimmed on a second line.
+    """
+    formatted = _format_timestamp(image.get("created_at"))
+    if formatted == "-":
+        return Text(formatted, style=_STYLE_META)
+    date, _, time = formatted.partition(" ")
+    text = Text(date, style=_STYLE_COLUMN)
+    if time:
+        text.append("\n")
+        text.append(time, style=_STYLE_META)
+    return text
+
+
+#: Private-image table columns, in display order.
+_PRIVATE_IMAGE_HEADERS: tuple[str, ...] = ("Name", "Status", "Image", "Size", "Created", "UUID")
+
+
+def _private_image_row(image: Mapping[str, object]) -> tuple[Text, ...]:
+    """Build one row of the wide private-image table.
+
+    :param image: One mapping returned by
+        :func:`autodl_cli.handlers.image.list_private_images`.
+    :returns: One styled cell per entry of :data:`_PRIVATE_IMAGE_HEADERS`.
+    """
+    return (
+        _value_cell(image.get("name"), _STYLE_LABEL),
+        _private_status_cell(image),
+        _private_spec_cell(image),
+        _value_cell(_format_gib(image.get("image_size")), _STYLE_NUM),
+        _private_created_cell(image),
+        _value_cell(image.get("image_uuid"), _STYLE_COLUMN),
+    )
+
+
+def _format_private_image_details(image: Mapping[str, object]) -> Text:
+    """Build the stacked detail cell used when the wide table cannot fit.
+
+    :param image: One private-image mapping.
+    :returns: Three styled lines combining every field shown by the wide
+        table.
+    """
+    percent, error = _private_progress(image)
+    status = _format_value(image.get("status"))
+    if error:
+        status = f"{status} · {error}"
+    elif percent is not None and image.get("status") != "finished":
+        status = f"{status} · {percent}%"
+
+    text = Text(_format_value(image.get("name")), style=_STYLE_LABEL)
+    text.append("\n")
+    text.append(status, style=_status_style(image.get("status")))
+    text.append(" · ", style=_STYLE_META)
+    text.append(_format_gib(image.get("image_size")), style=_STYLE_NUM)
+    text.append(" · ", style=_STYLE_META)
+    text.append(_format_timestamp(image.get("created_at")), style=_STYLE_META)
+    text.append("\n")
+    text.append(_format_private_framework(image), style=_STYLE_LABEL)
+    python_version = _format_value(image.get("python_v"))
+    if python_version != "-":
+        text.append(" · ", style=_STYLE_META)
+        text.append(python_version, style=_STYLE_COLUMN)
+    cuda_version = _format_value(image.get("cuda_v"))
+    if cuda_version != "-":
+        text.append(" · CUDA ", style=_STYLE_META)
+        text.append(cuda_version, style=_STYLE_NUM)
+    text.append(" · ", style=_STYLE_META)
+    text.append(_format_value(image.get("image_uuid")), style=_STYLE_COLUMN)
+    return text
+
+
+def _render_stacked_private_images(images: Sequence[dict[str, object]]) -> None:
+    """Render private images as a single stacked-details column.
+
+    Used when the terminal is too narrow for the wide table, so no field is
+    silently truncated.
+
+    :param images: Mappings returned by
+        :func:`autodl_cli.handlers.image.list_private_images`.
+    """
+    table = _table(f"Private images ({len(images)})")
+    table.add_column("Details")
+    for image in images:
+        table.add_row(_format_private_image_details(image))
+    console.print(table)
+
+
+def render_private_images(images: Sequence[dict[str, object]]) -> None:
+    """Render the account's private images as a Rich table.
+
+    Each row shows the image name, save status and progress, framework,
+    Python/OS, CUDA version, size, creation time, and UUID. When the table does
+    not fit the terminal, the fields are stacked under the name instead.
+    ``--json`` callers receive the API's entries unchanged.
+
+    :param images: Mappings returned by
+        :func:`autodl_cli.handlers.image.list_private_images`.
+    """
+    if not images:
+        console.print("No private images found.", style=_STYLE_META)
+        return
+
+    rows = [_private_image_row(image) for image in images]
+
+    # Rich shrinks columns until their content is ellipsised, so check whether
+    # the natural table width fits before drawing it.
+    content_widths = [
+        max(_text_width(header), *(_text_width(row[index]) for row in rows))
+        for index, header in enumerate(_PRIVATE_IMAGE_HEADERS)
+    ]
+    cell_padding = 2  # one space on each side of every cell
+    border_width = 2 + len(_PRIVATE_IMAGE_HEADERS) - 1  # table edges plus the inner borders
+    if sum(width + cell_padding for width in content_widths) + border_width > console.width:
+        _render_stacked_private_images(images)
+        return
+
+    table = _table(f"Private images ({len(images)})")
+    for header in _PRIVATE_IMAGE_HEADERS:
+        table.add_column(header, justify="right" if header == "Size" else "left")
     for row in rows:
         table.add_row(*row)
 

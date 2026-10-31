@@ -20,8 +20,8 @@ account · gpu · image · instance · tools — all from the command line.
 
 **autodl-cli** puts AutoDL's GPU cloud in your shell. Authenticate once, then check
 your balance, hunt for idle GPUs across regions, drill into machine-level capacity,
-browse the base-image catalogue, and read every instance on your account — without
-clicking through the web console.
+browse the base-image catalogue and your saved images, and read every instance
+on your account — without clicking through the web console.
 
 > ⚠️ This is an **unofficial** tool, not affiliated with AutoDL. It does **not**
 > use a public developer API — it reverse-engineers the private endpoints behind
@@ -113,6 +113,16 @@ autodl image list
 autodl image list -f pytorch --cuda 12
 autodl image list --python 3.12 --chip nvidia
 autodl --json image list --chip mthreads | jq -r '.[].image_uuid'
+```
+
+`image list-private` shows the images saved from your own instances, with
+their save status and progress, size, framework, creation time, and UUID. Every
+page is fetched, so the listing is complete regardless of AutoDL's page size.
+
+```bash
+autodl image list-private
+autodl image list-private --page-size 20
+autodl --json image list-private | jq -r '.[] | [.name, .status] | @tsv'
 ```
 
 ### 🖥️ Instances
