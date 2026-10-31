@@ -1,8 +1,7 @@
 """autodl-cli: command-line tooling and a Python SDK for AutoDL instances.
 
 The public library entry point is :mod:`autodl_cli.api`; exception types live
-in :mod:`autodl_cli.errors`. This is a scaffold: modules contain docstrings and
-placeholder signatures only.
+in :mod:`autodl_cli.errors`.
 """
 
 from __future__ import annotations

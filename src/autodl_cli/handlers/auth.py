@@ -1,4 +1,4 @@
-"""Phone/password authentication against the AutoDL developer API.
+"""Phone/password authentication against the AutoDL web-console API.
 
 The login flow is two POSTs: ``/api/v1/new_login`` exchanges a phone number and
 SHA-1 password hash for a short-lived ticket, then ``/api/v1/passport`` buys a

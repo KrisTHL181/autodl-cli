@@ -14,7 +14,7 @@ authors = [
     { name = "KrisTHL181", email = "KrisTHL181@outlook.com" },
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
@@ -35,8 +35,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# click2mcp brings the `mcp` SDK; publish click2mcp to PyPI before this extra
-# can install from there.
+# click2mcp brings the `mcp` SDK and provides the typed-tool generator.
 mcp = [
     "click2mcp>=0.1.0",
 ]

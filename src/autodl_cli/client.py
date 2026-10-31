@@ -1,4 +1,4 @@
-"""Authenticated HTTP client for the AutoDL developer API.
+"""Authenticated HTTP client for the AutoDL web-console API.
 
 Handlers go through this class instead of calling ``httpx`` directly. The
 client adds the mandatory ``AppVersion`` header, attaches the bearer token
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from types import TracebackType
 
-#: Root of the public AutoDL website, which also serves the developer API.
+#: Root of the public AutoDL website; this is the API the web console calls.
 DEFAULT_BASE_URL = "https://www.autodl.com"
 
 #: Value of the ``AppVersion`` header required by every API call.
@@ -69,7 +69,7 @@ def _error_message(response: httpx.Response, method: str, path: str) -> str:
 
 
 class AutoDLClient:
-    """Authenticated client for the AutoDL developer API.
+    """Authenticated client for the AutoDL web-console API.
 
     The client is safe to use as a context manager, which closes the
     underlying connection pool on exit. It performs no automatic retries,

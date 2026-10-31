@@ -35,6 +35,12 @@ on your account — without clicking through the web console.
 > **Requirement:** Python 3.10 or newer. Check with `python --version` before installing.
 
 ```bash
+pip install autodl-cli
+```
+
+Installing from source instead:
+
+```bash
 git clone https://github.com/KrisTHL181/autodl-cli.git
 cd autodl-cli
 pip install -e .
@@ -225,7 +231,7 @@ on. Each tool inherits the root `json` switch, and `autodl_help` / `autodl_run`
 remain available as escape hatches.
 
 ```bash
-pip install -e ".[mcp]"
+pip install "autodl-cli[mcp]"
 autodl-mcp                      # serve over stdio
 autodl-mcp --groups instance    # only the instance commands
 ```
@@ -335,8 +341,8 @@ AutoDL web API (reverse-engineered)
 ### Optional Dependencies
 
 ```bash
-pip install -e ".[mcp]"        # click2mcp — the autodl-mcp server entry point
-pip install -e ".[test]"       # pytest
+pip install "autodl-cli[mcp]"  # click2mcp — the autodl-mcp server entry point
+pip install "autodl-cli[test]" # pytest, for working on the project itself
 ```
 
 ### Shell Completions
@@ -365,6 +371,7 @@ state out of your real config.
 ### Development
 
 ```bash
+pip install -e ".[test]"        # editable install with pytest
 pre-commit run --all-files
 ruff check .
 ruff format .
