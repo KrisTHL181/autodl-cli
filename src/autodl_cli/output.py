@@ -679,6 +679,222 @@ def render_gpu_matches(matches: Sequence[dict[str, object]]) -> None:
     console.print(table)
 
 
+def _format_gib(value: object) -> str:
+    """Format a byte count for the machine table.
+
+    :param value: Raw byte count from the machine response.
+    :returns: ``"62G"``, ``"1.5T"``, or ``"-"`` when the value is not a
+        positive integer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return "-"
+    gib = value / (1024**3)
+    if gib >= 1024:
+        return f"{gib / 1024:.1f}T"
+    return f"{gib:.0f}G"
+
+
+def _format_machine_region(machine: dict[str, object]) -> str:
+    """Return the region name with its sign on a second line.
+
+    :param machine: One mapping returned by
+        :func:`autodl_cli.handlers.gpu.list_machines`.
+    :returns: ``"北京B区\\nbj-B1"``, or whichever part is present.
+    """
+    region = _format_value(machine.get("region_name"))
+    sign = machine.get("region_sign")
+    if isinstance(sign, str) and sign:
+        return f"{region}\n{sign}"
+    return region
+
+
+def _format_machine_title(machine: dict[str, object]) -> str:
+    """Build the identifier cell: alias (or name) over the machine ID.
+
+    :param machine: One machine mapping.
+    :returns: The two-line identifier.
+    """
+    alias = machine.get("machine_alias")
+    header = alias if isinstance(alias, str) and alias else _format_value(machine.get("machine_name"))
+    machine_id = machine.get("machine_id")
+    if isinstance(machine_id, str) and machine_id:
+        return f"{header}\n{machine_id}"
+    return header
+
+
+def _format_machine_spec(machine: dict[str, object]) -> str:
+    """Format the per-GPU CPU and memory allocation.
+
+    :param machine: One machine mapping.
+    :returns: ``"12c/62G"``, with ``"-"`` for a missing part.
+    """
+    cpu = machine.get("cpu_per_gpu")
+    cpu_text = f"{cpu}c" if isinstance(cpu, int) and not isinstance(cpu, bool) and cpu > 0 else "-"
+    return f"{cpu_text}/{_format_gib(machine.get('mem_per_gpu'))}"
+
+
+def _format_machine_price(machine: dict[str, object], key: str) -> str:
+    """Format a raw thousandths-of-a-yuan price.
+
+    :param machine: One machine mapping.
+    :param key: Price field name.
+    :returns: A ``¥`` amount, or ``"-"`` when the price is missing.
+    """
+    return _format_yuan(machine.get(key))
+
+
+def _render_machine_page_footer(page: Mapping[str, object]) -> None:
+    """Print the pagination summary below the machine table.
+
+    :param page: The mapping returned by
+        :func:`autodl_cli.handlers.gpu.list_machines`.
+    """
+    total = _format_value(page.get("result_total"))
+    max_page = page.get("max_page")
+    if page.get("all_pages"):
+        console.print(f"Showing every page ({total} machines).", style="dim")
+        return
+    if isinstance(max_page, int) and not isinstance(max_page, bool) and max_page > 1:
+        console.print(
+            f"Page {_format_value(page.get('page_index'))}/{max_page} · {total} machines · "
+            "use --page, --page-size, or --all.",
+            style="dim",
+        )
+        return
+    console.print(f"{total} machines.", style="dim")
+
+
+#: Machine table columns, in display order.
+_MACHINE_HEADERS: tuple[str, ...] = (
+    "Region",
+    "Machine",
+    "GPU",
+    "Idle",
+    "¥/h",
+    "¥/day",
+    "CPU/RAM",
+    "Disk",
+    "CUDA",
+)
+
+
+def _machine_row(machine: dict[str, object]) -> tuple[str, ...]:
+    """Build one row of the wide machine table.
+
+    :param machine: One mapping returned by
+        :func:`autodl_cli.handlers.gpu.list_machines`.
+    :returns: One cell per entry of :data:`_MACHINE_HEADERS`.
+    """
+    idle = _format_value(machine.get("gpu_idle_num"))
+    total = _format_value(machine.get("gpu_number"))
+    return (
+        _format_machine_region(machine),
+        _format_machine_title(machine),
+        _format_value(machine.get("gpu_name")),
+        f"{idle}/{total}",
+        _format_machine_price(machine, "payg_price"),
+        _format_machine_price(machine, "daily_price"),
+        _format_machine_spec(machine),
+        _format_gib(machine.get("max_instance_disk_size")),
+        _format_value(machine.get("highest_cuda_version")),
+    )
+
+
+def _format_machine_details(machine: dict[str, object]) -> str:
+    """Build the stacked detail cell used when the wide table cannot fit.
+
+    :param machine: One machine mapping.
+    :returns: Three lines combining every field shown by the wide table.
+    """
+    region = _format_value(machine.get("region_name"))
+    sign = machine.get("region_sign")
+    if isinstance(sign, str) and sign:
+        region = f"{region} ({sign})"
+    alias = machine.get("machine_alias")
+    label = alias if isinstance(alias, str) and alias else _format_value(machine.get("machine_name"))
+    machine_id = machine.get("machine_id")
+    if isinstance(machine_id, str) and machine_id:
+        label = f"{label} ({machine_id})"
+
+    idle = _format_value(machine.get("gpu_idle_num"))
+    total = _format_value(machine.get("gpu_number"))
+    gpu = _format_value(machine.get("gpu_name"))
+    cuda = _format_value(machine.get("highest_cuda_version"))
+    payg = _format_machine_price(machine, "payg_price")
+    daily = _format_machine_price(machine, "daily_price")
+    return "\n".join(
+        (
+            f"{region} · {label}",
+            f"{gpu} ×{total} · Idle {idle}/{total} · CUDA {cuda}",
+            f"{payg}/h · {daily}/day · {_format_machine_spec(machine)} · "
+            f"Disk {_format_gib(machine.get('max_instance_disk_size'))}",
+        )
+    )
+
+
+def _render_stacked_machines(machines: Sequence[dict[str, object]]) -> None:
+    """Render machines as a single stacked-details column.
+
+    Used when the terminal is too narrow for the wide table, so no field is
+    silently truncated.
+
+    :param machines: Mappings returned by
+        :func:`autodl_cli.handlers.gpu.list_machines`.
+    """
+    table = Table(title=f"GPU machines ({len(machines)})")
+    table.add_column("Details")
+    for machine in machines:
+        table.add_row(_format_machine_details(machine))
+    console.print(table)
+
+
+def render_gpu_machines(page: Mapping[str, object]) -> None:
+    """Render a machine-listing page as a Rich table.
+
+    The table shows the per-machine GPU stock, pay-as-you-go and daily prices,
+    per-GPU CPU/memory allocation, instance disk limit, and CUDA version. When
+    the table does not fit the terminal, every field is stacked under a single
+    details column instead. ``--json`` callers receive the complete handler
+    result instead.
+
+    :param page: The mapping returned by
+        :func:`autodl_cli.handlers.gpu.list_machines`.
+    """
+    entries = page.get("machines")
+    if not isinstance(entries, list) or not entries:
+        console.print("No matching machines found.")
+        return
+
+    machines = [machine for machine in entries if isinstance(machine, dict)]
+    if not machines:
+        console.print("No matching machines found.")
+        return
+    rows = [_machine_row(machine) for machine in machines]
+
+    # Rich shrinks columns until their content is ellipsised, so check whether
+    # the natural table width fits before drawing it.
+    content_widths = [
+        max(_text_width(header), *(_text_width(row[index]) for row in rows))
+        for index, header in enumerate(_MACHINE_HEADERS)
+    ]
+    cell_padding = 2  # one space on each side of every cell
+    border_width = 2 + len(_MACHINE_HEADERS) - 1  # table edges plus the inner borders
+    if sum(width + cell_padding for width in content_widths) + border_width > console.width:
+        _render_stacked_machines(machines)
+        _render_machine_page_footer(page)
+        return
+
+    table = Table(title=f"GPU machines ({len(machines)})")
+    for header in _MACHINE_HEADERS:
+        right_aligned = header not in ("Region", "Machine", "GPU", "CUDA")
+        table.add_column(header, justify="right" if right_aligned else "left")
+    for row in rows:
+        table.add_row(*row)
+
+    console.print(table)
+    _render_machine_page_footer(page)
+
+
 def success(message: str) -> None:
     """Print a success message.
 
