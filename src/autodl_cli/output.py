@@ -277,33 +277,77 @@ def _format_instance_title(instance: dict[str, object]) -> str:
 
 
 def _format_instance_status(instance: dict[str, object]) -> str:
-    """Combine an instance's status with its sub-status.
+    """Combine an instance's status with its sub-status and OOM state.
 
     :param instance: One instance mapping returned by the API handler.
     :returns: ``"status (sub_status)"``, or just the status when no sub-status
-        is present.
+        is present, with ``" (OOM)"`` appended when the last run was killed for
+        running out of memory.
     """
     status = _format_value(instance.get("status"))
     sub_status = instance.get("sub_status")
     if isinstance(sub_status, str) and sub_status:
-        return f"{status} ({sub_status})"
+        status = f"{status} ({sub_status})"
+    if instance.get("oom_killed") is True:
+        status = f"{status} (OOM)"
     return status
 
 
 def _format_instance_spec(instance: dict[str, object]) -> str:
     """Describe the GPU allocation as the web console does.
 
+    ``start_mode`` wins over the snapshot GPU name: an instance started in
+    ``non_gpu`` mode runs without its cards even though the response still
+    carries the GPU alias the snapshot was built for.
+
     :param instance: One instance mapping returned by the API handler.
     :returns: The GPU alias and requested count (``"RTX 3090 ×1"``), ``"CPU"``
         for a CPU-only instance, or ``"-"``.
     """
+    if instance.get("start_mode") == "non_gpu":
+        return "CPU"
     name = instance.get("user_define_gpu_name") or instance.get("snapshot_gpu_alias_name")
     if not isinstance(name, str) or not name:
-        return "CPU" if instance.get("start_mode") == "non_gpu" else "-"
+        return "-"
     amount = instance.get("req_gpu_amount")
     if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
         return f"{name} ×{amount}"
     return name
+
+
+def _format_instance_cards(instance: dict[str, object]) -> str:
+    """Describe how many cards are free on the instance's machine.
+
+    The list endpoint reports machine-level availability, not the instance's
+    own allocation. It answers whether a stopped instance could be started
+    with its cards, and explains why an instance fell back to CPU mode.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: ``"Cards <idle>/<total>"``, or an empty string when the machine
+        does not report card counts.
+    """
+    idle = instance.get("gpu_idle_num")
+    total = instance.get("gpu_all_num")
+    if (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and total > 0
+        and isinstance(idle, int)
+        and not isinstance(idle, bool)
+    ):
+        return f"Cards {idle}/{total}"
+    return ""
+
+
+def _format_instance_spec_cell(instance: dict[str, object]) -> str:
+    """Build the Spec cell: the GPU allocation plus card availability.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The spec, with the card line appended when reported.
+    """
+    cards = _format_instance_cards(instance)
+    spec = _format_instance_spec(instance)
+    return f"{spec}\n{cards}" if cards else spec
 
 
 def _format_instance_price(instance: dict[str, object]) -> str:
@@ -426,7 +470,8 @@ def _format_instance_release(instance: dict[str, object], *, now: datetime | Non
 
     A powered-off instance is released if it is not powered on again within
     :data:`SHUTDOWN_RETENTION` days of its last status change. Running
-    instances fall back to the scheduled stop, expiry, or rent deadline.
+    instances fall back to their expiry or rent deadline; the timed shutdown
+    is a separate column built by :func:`_format_instance_stop`.
 
     :param instance: One instance mapping returned by the API handler.
     :param now: Current time, used by tests to freeze the countdown; defaults
@@ -448,11 +493,34 @@ def _format_instance_release(instance: dict[str, object], *, now: datetime | Non
                 return "due"
             return f"in {_format_remaining(remaining)}"
 
-    for key in ("timed_shutdown_at", "expired_at"):
-        value = instance.get(key)
-        if isinstance(value, dict) and value.get("Valid"):
-            return _format_date(value.get("Time"))
+    expired_at = instance.get("expired_at")
+    if isinstance(expired_at, dict) and expired_at.get("Valid"):
+        return _format_date(expired_at.get("Time"))
     return _format_date(instance.get("rent_deadline"))
+
+
+def _format_instance_stop(instance: dict[str, object]) -> str:
+    """Return the instance's scheduled shutdown, when one is set.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: ``"Stop YYYY-MM-DD"``, or an empty string when no timed shutdown
+        is scheduled.
+    """
+    value = instance.get("timed_shutdown_at")
+    if isinstance(value, dict) and value.get("Valid"):
+        return f"Stop {_format_date(value.get('Time'))}"
+    return ""
+
+
+def _format_instance_release_cell(instance: dict[str, object]) -> str:
+    """Build the Release cell: the release deadline plus timed shutdown.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The release text, with the scheduled stop appended when set.
+    """
+    stop = _format_instance_stop(instance)
+    release = _format_instance_release(instance)
+    return f"{release}\n{stop}" if stop else release
 
 
 def _first_text(instance: dict[str, object], *keys: str) -> str:
@@ -490,11 +558,19 @@ def _format_instance_details(instance: dict[str, object]) -> str:
 
     disk = _format_instance_disk(instance).replace("\n", " / ")
     billing = _format_instance_billing(instance).replace("\n", " ")
+    spec = f"Spec {_format_instance_spec(instance)}"
+    cards = _format_instance_cards(instance)
+    if cards:
+        spec = f"{spec} · {cards}"
+    release = f"Release {_format_instance_release(instance)}"
+    stop = _format_instance_stop(instance)
+    if stop:
+        release = f"{release} · {stop}"
     lines = (
         header,
-        f"Status {_format_instance_status(instance)} · Spec {_format_instance_spec(instance)}",
+        f"Status {_format_instance_status(instance)} · {spec}",
         f"Disk {disk} · Health {_first_text(instance, 'disk_health_status')}",
-        f"Billing {billing} · Release {_format_instance_release(instance)}",
+        f"Billing {billing} · {release}",
         f"SSH {_format_value(instance.get('ssh_command'))}",
     )
     return "\n".join(lines)
@@ -520,12 +596,13 @@ def _render_stacked_instances(instances: Sequence[dict[str, object]]) -> None:
 def render_instances(instances: Sequence[dict[str, object]]) -> None:
     """Render a list of instances as a one-row-per-instance Rich table.
 
-    The columns mirror the web console: location/ID/name, status, spec, disk,
-    health, billing, release deadline, and SSH. Short columns keep their
-    content width; SSH takes whatever space is left and is ellipsised, or
-    omitted, on narrower terminals. If even the short columns do not fit, the
-    fields are stacked under the instance ID instead. ``--json`` callers
-    receive the complete data.
+    The columns mirror the web console: location/ID/name, status (with an
+    ``OOM`` marker), spec and the machine's free/total cards, disk, health,
+    billing, release deadline with the scheduled stop, and SSH. Short columns
+    keep their content width; SSH takes whatever space is left and is
+    ellipsised, or omitted, on narrower terminals. If even the short columns do
+    not fit, the fields are stacked under the instance ID instead. ``--json``
+    callers receive the complete data.
 
     :param instances: Mappings returned by
         :func:`autodl_cli.handlers.instance.list_instances`.
@@ -539,11 +616,11 @@ def render_instances(instances: Sequence[dict[str, object]]) -> None:
         (
             _format_instance_title(instance),
             _format_instance_status(instance),
-            _format_instance_spec(instance),
+            _format_instance_spec_cell(instance),
             _format_instance_disk(instance),
             _first_text(instance, "disk_health_status"),
             _format_instance_billing(instance),
-            _format_instance_release(instance),
+            _format_instance_release_cell(instance),
             _format_value(instance.get("ssh_command")),
         )
         for instance in instances

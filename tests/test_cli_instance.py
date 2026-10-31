@@ -29,6 +29,10 @@ INSTANCES = [
         "status": "running",
         "status_at": "2026-10-30T06:10:07+08:00",
         "sub_status": "",
+        "start_mode": "gpu",
+        "oom_killed": False,
+        "gpu_all_num": 8,
+        "gpu_idle_num": 7,
         "snapshot_gpu_alias_name": "RTX 3090",
         "req_gpu_amount": 1,
         "region_name": "内蒙B区",
@@ -39,7 +43,7 @@ INSTANCES = [
         "payg_price": 1480,
         "daily_price": 0,
         "rent_deadline": "2027-07-01T00:00:00+08:00",
-        "timed_shutdown_at": {"Time": "0001-01-01T00:00:00Z", "Valid": False},
+        "timed_shutdown_at": {"Time": "2026-11-30T00:00:00+08:00", "Valid": True},
         "expired_at": {"Time": "0001-01-01T00:00:00Z", "Valid": False},
         "ssh_command": "ssh -p 39684 root@connect.nmb2.seetacloud.com",
     },
@@ -50,6 +54,10 @@ INSTANCES = [
         "status": "shutdown",
         "status_at": "2026-10-31T12:00:00+08:00",
         "sub_status": "",
+        "start_mode": "gpu",
+        "oom_killed": False,
+        "gpu_all_num": 8,
+        "gpu_idle_num": 0,
         "snapshot_gpu_alias_name": "RTX 3080 Ti",
         "req_gpu_amount": 3,
         "region_name": "西北B区",
@@ -124,6 +132,8 @@ def test_list_human_output_shows_instances(home: Path, monkeypatch) -> None:
     assert "running" in result.output
     assert "RTX 3090 ×1" in result.output
     assert "RTX 3080 Ti ×3" in result.output
+    assert "Cards 7/8" in result.output
+    assert "Cards 0/8" in result.output
     assert "Sys 19.60%" in result.output
     assert "Data 94.00%" in result.output
     assert "Sys 3.24%" in result.output
@@ -131,6 +141,7 @@ def test_list_human_output_shows_instances(home: Path, monkeypatch) -> None:
     assert "normal" in result.output
     assert "¥1.480/h" in result.output
     assert "2027-07-01" in result.output
+    assert "Stop 2026-11-30" in result.output
     assert "in 14d 11h 27m" in result.output
     assert "ssh -p 39684 root@connect.nmb2.seetacloud.com" in result.output
     assert TOKEN not in result.output
@@ -203,11 +214,41 @@ def test_list_human_output_stacks_fields_on_narrow_terminal(home: Path, monkeypa
     assert "Instances (2)" in result.output
     assert "cs1a2b3c4d5e6f7g8h" in result.output
     assert "内蒙B区 / 431机" in result.output
-    assert "Status running · Spec RTX 3090 ×1" in result.output
+    assert "Status running · Spec RTX 3090 ×1 · Cards 7/8" in result.output
     assert "Disk Sys 19.60% / Data 94.00% · Health normal" in result.output
-    assert "Billing payg ¥1.480/h · Release 2027-07-01" in result.output
+    assert "Billing payg ¥1.480/h · Release 2027-07-01 · Stop" in result.output
+    assert "2026-11-30" in result.output
     assert "Billing payg ¥3.250/h · Release in 14d 11h 27m" in result.output
     assert "SSH ssh -p 39684 root@connect.nmb2.seetacloud.com" in result.output
+
+
+def test_list_stacked_output_reports_cpu_mode(home: Path, monkeypatch) -> None:
+    """``start_mode: non_gpu`` wins over the snapshot GPU alias."""
+    _seed_token()
+    instance = dict(INSTANCES[0], start_mode="non_gpu", gpu_idle_num=0)
+    monkeypatch.setattr(instance_commands.instance_handler, "list_instances", lambda client, **kwargs: [instance])
+    monkeypatch.setattr(output_module, "console", Console(width=80))
+    monkeypatch.setattr(output_module, "_current_time", lambda: NOW)
+
+    result = CliRunner().invoke(main, ["instance", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Spec CPU · Cards 0/8" in result.output
+    assert "RTX 3090" not in result.output
+
+
+def test_list_marks_oom_killed_instances(home: Path, monkeypatch) -> None:
+    """A previously OOM-killed instance is flagged in the status column."""
+    _seed_token()
+    instance = dict(INSTANCES[0], oom_killed=True)
+    monkeypatch.setattr(instance_commands.instance_handler, "list_instances", lambda client, **kwargs: [instance])
+    monkeypatch.setattr(output_module, "console", Console(width=80))
+    monkeypatch.setattr(output_module, "_current_time", lambda: NOW)
+
+    result = CliRunner().invoke(main, ["instance", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "Status running (OOM)" in result.output
 
 
 def test_list_empty_result_prints_message(home: Path, monkeypatch) -> None:
