@@ -33,6 +33,7 @@ __all__ = [
     "login",
     "power_off",
     "power_on",
+    "release_instance",
     "save_image",
 ]
 
@@ -244,6 +245,23 @@ def power_off(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.power_off(client, instance_uuid)
+
+
+def release_instance(token: str, instance_uuid: str) -> dict[str, object]:
+    """Release an instance, deleting it and its data disk.
+
+    Release is irreversible. AutoDL accepts the request immediately and answers
+    with a null ``data`` payload; the instance does not need to be powered off
+    first.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``released``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.release_instance(client, instance_uuid)
 
 
 def save_image(

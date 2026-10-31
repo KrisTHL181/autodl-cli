@@ -5,7 +5,9 @@ filter is applied locally because the API has no keyword field. ``detail``
 reads one instance's configuration snapshot from
 ``GET /api/v1/instance/snapshot``. ``power-on`` and ``power-off`` post to
 ``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
-which report success with a null ``data`` payload. ``save-image`` posts to
+which report success with a null ``data`` payload. ``release`` posts to
+``POST /api/v1/instance/release`` and asks for confirmation because it deletes
+the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
 their handlers.
 """
@@ -194,6 +196,46 @@ def power_off_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.success(f"Power-off requested for instance {result['instance_uuid']}.")
+
+
+@instance.command("release", help="Release an instance, deleting it and its data disk.")
+@click.argument("instance_uuid")
+@click.option("--yes", "-y", is_flag=True, help="Release without asking for confirmation.")
+@click.pass_context
+def release_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
+    """Release an instance, deleting it and its data disk.
+
+    Release is irreversible: the instance and its data disk are deleted. The
+    command asks for confirmation unless ``--yes`` is passed; use ``--yes`` in
+    scripts.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param yes: Whether to skip the confirmation prompt.
+    :raises click.ClickException: When the argument is blank, no token is
+        configured, or the API call fails.
+    :raises click.Abort: When the user declines the confirmation prompt.
+    """
+    token = require_token(load_config())
+    if not yes:
+        click.confirm(
+            f"Release instance {instance_uuid}? This deletes it and its data disk.",
+            abort=True,
+        )
+
+    try:
+        with AutoDLClient(token) as client:
+            result = instance_handler.release_instance(client, instance_uuid)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Release requested for instance {result['instance_uuid']}.")
 
 
 @instance.command("save-image", help="Save an instance as a custom image.")

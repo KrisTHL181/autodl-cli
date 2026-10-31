@@ -25,6 +25,11 @@ instance UUID in the body. It answers with ``"data": null`` as well, so
 Powering an instance off keeps its data; AutoDL releases it after the retention
 window shown by ``instance list`` unless it is powered on again.
 
+Releasing an instance posts to ``POST /api/v1/instance/release`` with the same
+``{"instance_uuid": ...}`` body and answers with ``"data": null``. Release is
+irreversible: the instance and its data disk are deleted. It does not go through
+the power-off endpoint first.
+
 TODO: implement the remaining lifecycle handlers and return the structures
 defined in :mod:`autodl_cli.models` instead of raw response dictionaries.
 """
@@ -55,6 +60,9 @@ INSTANCE_POWER_ON_PATH = "/api/v1/instance/power_on"
 
 #: Path of the power-off endpoint.
 INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
+
+#: Path of the release endpoint.
+INSTANCE_RELEASE_PATH = "/api/v1/instance/release"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
@@ -307,13 +315,32 @@ def power_off(client: AutoDLClient, instance_id: str) -> dict[str, object]:
 
 
 def release_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
-    """Release an instance.
+    """Release an instance, deleting it and its data disk.
+
+    ``POST /api/v1/instance/release`` answers with ``"data": null`` on success,
+    so success is signalled by the envelope's ``code`` alone. Release is
+    irreversible: AutoDL deletes the instance and its data disk. The instance
+    does not need to be powered off first.
 
     :param client: Authenticated API client.
-    :param instance_id: Instance identifier.
-    :returns: The operation result.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``released``.
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
     """
-    ...
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    body: dict[str, object] = {"instance_uuid": instance_uuid}
+    payload = client.request("POST", INSTANCE_RELEASE_PATH, json=body)
+    require_success_any(payload, action="release instance")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "released": True,
+    }
 
 
 def save_image(

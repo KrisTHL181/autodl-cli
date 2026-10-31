@@ -587,3 +587,67 @@ def test_power_on_failure_raises_api_error() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(APIError, match="already running"):
             instance_handler.power_on(client, POWER_ON_INSTANCE_UUID)
+
+
+RELEASE_INSTANCE_UUID = "rl3qx71mer-9d05c2f8"
+
+
+def test_release_instance_posts_expected_body_and_tolerates_null_data() -> None:
+    """The handler trims the UUID, POSTs the console body, and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.release_instance(client, f" {RELEASE_INSTANCE_UUID} ")
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/instance/release",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {"instance_uuid": RELEASE_INSTANCE_UUID},
+    }
+    assert result == {
+        "instance_uuid": RELEASE_INSTANCE_UUID,
+        "released": True,
+    }
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_release_instance_rejects_blank_instance_id(instance_id: str) -> None:
+    """A blank UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_id must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.release_instance(client, instance_id)
+
+
+def test_release_instance_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-12"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.release_instance(client, RELEASE_INSTANCE_UUID)
+
+
+def test_release_instance_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "InstanceNotFound", "msg": "no such instance", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no such instance"):
+            instance_handler.release_instance(client, RELEASE_INSTANCE_UUID)
