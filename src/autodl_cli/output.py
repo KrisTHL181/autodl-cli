@@ -203,6 +203,115 @@ def render_account(account: dict[str, object]) -> None:
     console.print(table)
 
 
+def _format_instance_gpu(instance: dict[str, object]) -> str:
+    """Describe an instance's GPU allocation.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: The GPU alias with a count when more than one is requested,
+        ``"CPU"`` for a CPU-only instance, or ``"-"``.
+    """
+    name = instance.get("user_define_gpu_name") or instance.get("snapshot_gpu_alias_name")
+    if not isinstance(name, str) or not name:
+        return "CPU" if instance.get("start_mode") == "non_gpu" else "-"
+    amount = instance.get("req_gpu_amount")
+    if isinstance(amount, int) and not isinstance(amount, bool) and amount > 1:
+        return f"{name} ×{amount}"
+    return name
+
+
+def _format_instance_status(instance: dict[str, object]) -> str:
+    """Combine an instance's status with its sub-status.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: ``"status (sub_status)"``, or just the status when no sub-status
+        is present.
+    """
+    status = _format_value(instance.get("status"))
+    sub_status = instance.get("sub_status")
+    if isinstance(sub_status, str) and sub_status:
+        return f"{status} ({sub_status})"
+    return status
+
+
+def _format_instance_price(instance: dict[str, object]) -> str:
+    """Format an instance's hourly or daily price.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: A ``¥…/h`` or ``¥…/day`` string, or ``"-"`` when no price is
+        reported.
+    """
+    payg_price = instance.get("payg_price")
+    if isinstance(payg_price, int) and not isinstance(payg_price, bool) and payg_price > 0:
+        return f"{_format_yuan(payg_price)}/h"
+    daily_price = instance.get("daily_price")
+    if isinstance(daily_price, int) and not isinstance(daily_price, bool) and daily_price > 0:
+        return f"{_format_yuan(daily_price)}/day"
+    return "-"
+
+
+def _first_text(instance: dict[str, object], *keys: str) -> str:
+    """Return the first non-empty string among ``keys``.
+
+    :param instance: One instance mapping returned by the API handler.
+    :param keys: Candidate field names, in preference order.
+    :returns: The first non-empty value, or ``"-"``.
+    """
+    for key in keys:
+        value = instance.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "-"
+
+
+def _format_instance_summary(instance: dict[str, object]) -> str:
+    """Join the status, billing, GPU, region, and price into one line.
+
+    :param instance: One instance mapping returned by the API handler.
+    :returns: Dot-separated fields, skipping missing values.
+    """
+    parts = (
+        _format_instance_status(instance),
+        _format_value(instance.get("charge_type")),
+        _format_instance_gpu(instance),
+        _first_text(instance, "region_name", "region_sign"),
+        _format_instance_price(instance),
+    )
+    return " · ".join(part for part in parts if part != "-") or "-"
+
+
+def render_instances(instances: Sequence[dict[str, object]]) -> None:
+    """Render a list of instances as a two-column Rich table.
+
+    Long connection strings would squeeze an eight-column table below a
+    readable width on an 80-column terminal, so each instance keeps its ID in
+    the first column and stacks the name, summary, and SSH command in the
+    second.
+
+    :param instances: Mappings returned by
+        :func:`autodl_cli.handlers.instance.list_instances`.
+    """
+    if not instances:
+        console.print("No instances found.")
+        return
+
+    table = Table(title=f"Instances ({len(instances)})")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("Instance")
+
+    for instance in instances:
+        lines: list[str] = []
+        name = instance.get("name")
+        if isinstance(name, str) and name:
+            lines.append(name)
+        lines.append(_format_instance_summary(instance))
+        ssh_command = instance.get("ssh_command")
+        if isinstance(ssh_command, str) and ssh_command:
+            lines.append(ssh_command)
+        table.add_row(_format_value(instance.get("uuid")), "\n".join(lines))
+
+    console.print(table)
+
+
 def success(message: str) -> None:
     """Print a success message.
 

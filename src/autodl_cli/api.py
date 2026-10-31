@@ -9,11 +9,17 @@ and normalises internal exceptions into the
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from autodl_cli.client import AutoDLClient
 from autodl_cli.handlers import account as account_handler
 from autodl_cli.handlers import auth as auth_handler
+from autodl_cli.handlers import instance as instance_handler
 
-__all__ = ["AutoDLClient", "get_balance", "get_current_user", "login"]
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+__all__ = ["AutoDLClient", "get_balance", "get_current_user", "list_instances", "login"]
 
 
 def login(
@@ -55,6 +61,41 @@ def get_balance(token: str, *, charge_type: str = "payg") -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return account_handler.get_balance(client, charge_type=charge_type)
+
+
+def list_instances(
+    token: str,
+    *,
+    page_size: int = instance_handler.DEFAULT_PAGE_SIZE,
+    statuses: Iterable[str] = (),
+    charge_types: Iterable[str] = (),
+    sub_name: str = "",
+    unbind_sub_user: bool = False,
+) -> list[dict[str, object]]:
+    """Return every instance visible to an API token.
+
+    Every page is fetched, so the result is not limited by AutoDL's
+    per-request page size.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param page_size: Instances requested per API call; must be positive.
+    :param statuses: Only return instances whose status is one of these values.
+    :param charge_types: Only return instances with one of these billing modes.
+    :param sub_name: Only return instances whose bound sub-user name matches.
+    :param unbind_sub_user: Only return instances with no bound sub-user.
+    :returns: One mapping per instance.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.list_instances(
+            client,
+            page_size=page_size,
+            statuses=statuses,
+            charge_types=charge_types,
+            sub_name=sub_name,
+            unbind_sub_user=unbind_sub_user,
+        )
 
 
 def get_current_user(token: str) -> dict[str, object]:
