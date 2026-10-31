@@ -1,8 +1,8 @@
 """``autodl account`` — account-level commands.
 
-Currently exposes the wallet balance. The handler returns AutoDL's raw
-thousandths-of-a-yuan values; the human-readable view converts them to yuan
-while ``--json`` preserves the API shape.
+Exposes the authenticated account profile and the wallet balance. The balance
+handler returns AutoDL's raw thousandths-of-a-yuan values; the human-readable
+view converts them to yuan while ``--json`` preserves the API shape.
 """
 
 from __future__ import annotations
@@ -51,6 +51,30 @@ def balance(ctx: click.Context, charge_type: str) -> None:
         return
 
     output.render_balance(result, charge_type=charge_type)
+
+
+@account.command("me", help="Show the authenticated account profile.")
+@click.pass_context
+def me(ctx: click.Context) -> None:
+    """Show the authenticated account profile.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :raises click.ClickException: When no token is configured or the API call
+        fails.
+    """
+    token = require_token(load_config())
+
+    try:
+        with AutoDLClient(token) as client:
+            result = account_handler.get_me(client)
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.render_account(result)
 
 
 def register_account(main_group: click.Group) -> click.Group:

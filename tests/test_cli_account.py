@@ -1,4 +1,4 @@
-"""Tests for ``autodl account balance`` through the real Click entry point."""
+"""Tests for ``autodl account`` commands through the real Click entry point."""
 
 from __future__ import annotations
 
@@ -23,6 +23,21 @@ BALANCE = {
     "to_expire_voucher_num": 1,
     "certain_conditions_voucher_balance": 0,
     "total_recharge_asset": 500000,
+}
+ACCOUNT = {
+    "id": 751375,
+    "username": "tester",
+    "nickname": "",
+    "email": "tester@example.com",
+    "email_confirmed": True,
+    "phone_area": "+86",
+    "phone": "13800138000",
+    "status": "normal",
+    "created_at": "2026-01-01T00:00:00+08:00",
+    "logged_in_at": "2026-10-31T23:28:26.905+08:00",
+    "max_instance_num": 30,
+    "sub_user_num": 10,
+    "private_image_num": 20,
 }
 
 
@@ -119,6 +134,66 @@ def test_balance_api_failure_is_a_clean_click_exception(home: Path, monkeypatch)
     monkeypatch.setattr(account_commands.account_handler, "get_balance", failing_get_balance)
 
     result = CliRunner().invoke(main, ["--json", "account", "balance"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_me_json_returns_raw_api_data(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler result unchanged."""
+    _seed_token()
+    monkeypatch.setattr(account_commands.account_handler, "get_me", lambda client: ACCOUNT)
+
+    result = CliRunner().invoke(main, ["--json", "account", "me"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == ACCOUNT
+    assert TOKEN not in result.output
+
+
+def test_me_human_output_shows_profile(home: Path, monkeypatch) -> None:
+    """The table shows identity, contact, and quota fields."""
+    _seed_token()
+    monkeypatch.setattr(account_commands.account_handler, "get_me", lambda client: ACCOUNT)
+
+    result = CliRunner().invoke(main, ["account", "me"])
+
+    assert result.exit_code == 0, result.output
+    assert "Account" in result.output
+    assert "tester" in result.output
+    assert "751375" in result.output
+    assert "+86 13800138000" in result.output
+    assert "2026-10-31 23:28:26" in result.output
+    assert "Max instances" in result.output
+    assert TOKEN not in result.output
+
+
+def test_me_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        account_commands.account_handler,
+        "get_me",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["--json", "account", "me"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_me_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_get_me(client):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(account_commands.account_handler, "get_me", failing_get_me)
+
+    result = CliRunner().invoke(main, ["--json", "account", "me"])
 
     assert result.exit_code == 1
     assert "token expired" in result.output

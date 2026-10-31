@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from autodl_cli import __version__
 from autodl_cli.errors import APIError, AuthError
+from autodl_cli.handlers import account as account_handler
 from autodl_cli.handlers._common import require_success
 
 if TYPE_CHECKING:
@@ -130,11 +131,12 @@ def login(
 def get_current_user(client: AutoDLClient) -> dict[str, object]:
     """Return the user owning the client's token.
 
+    This is the token-verification view of :func:`autodl_cli.handlers.account.get_me`.
+
     :param client: Client authenticated with the token to inspect.
     :returns: The user detail mapping.
     :raises autodl_cli.errors.AuthError: When the API rejects the token.
     :raises autodl_cli.errors.APIError: When a successful response has no
         object-valued ``data`` field.
     """
-    payload = client.request("GET", "/api/v1/user/detail")
-    return require_success(payload, action="user detail", error_type=AuthError)
+    return account_handler.get_me(client)

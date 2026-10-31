@@ -9,6 +9,7 @@ plain UTF-8 JSON with no ANSI escapes.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -87,7 +88,7 @@ def _format_yuan(value: object) -> str:
 def _format_value(value: object) -> str:
     """Format a non-monetary value for display.
 
-    :param value: Raw value from the wallet response.
+    :param value: Raw value from an API response.
     :returns: A display string, with ``"-"`` for missing or empty values.
     """
     if value is None:
@@ -123,6 +124,82 @@ def render_balance(balance: dict[str, object], *, charge_type: str | None = None
     if not rows_added:
         console.print(f"{title}: no data returned.")
         return
+    console.print(table)
+
+
+def _format_timestamp(value: object) -> str:
+    """Format an ISO 8601 timestamp for display.
+
+    The wall-clock time and the offset returned by AutoDL are kept as-is; no
+    conversion to the local time zone happens.
+
+    :param value: Raw timestamp from the account response.
+    :returns: ``YYYY-MM-DD HH:MM:SS``, the untouched string when it does not
+        parse, or ``"-"`` when the value is missing.
+    """
+    if not isinstance(value, str) or not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_phone(account: dict[str, object]) -> str:
+    """Join the phone area prefix and number.
+
+    :param account: The account mapping returned by the API handler.
+    :returns: ``"<area> <number>"``, or ``"-"`` when no number is present.
+    """
+    phone = account.get("phone")
+    if not isinstance(phone, str) or not phone:
+        return "-"
+    area = account.get("phone_area")
+    if isinstance(area, str) and area:
+        return f"{area} {phone}"
+    return phone
+
+
+def render_account(account: dict[str, object]) -> None:
+    """Render an account profile as a Rich table.
+
+    :param account: The account mapping returned by :func:`autodl_cli.handlers.account.get_me`.
+    """
+    table = Table(title="Account")
+    table.add_column("Field")
+    table.add_column("Value")
+
+    email = account.get("email")
+    if account.get("email_confirmed") is False and isinstance(email, str) and email:
+        email = f"{email} (unconfirmed)"
+
+    admin_role: str | None = None
+    if account.get("is_super_admin"):
+        admin_role = "super admin"
+    elif account.get("is_admin"):
+        admin_role = "admin"
+
+    fields: tuple[tuple[str, object], ...] = (
+        ("Username", account.get("username")),
+        ("Nickname", account.get("nickname")),
+        ("User ID", account.get("id")),
+        ("Email", email),
+        ("Phone", _format_phone(account)),
+        ("Status", account.get("status")),
+        ("Role", admin_role),
+        ("Registered", _format_timestamp(account.get("created_at"))),
+        ("Last login", _format_timestamp(account.get("logged_in_at"))),
+        ("Max instances", account.get("max_instance_num")),
+        ("Sub-users", account.get("sub_user_num")),
+        ("Private images", account.get("private_image_num")),
+    )
+
+    for label, value in fields:
+        if value is None or (isinstance(value, str) and not value):
+            continue
+        table.add_row(label, _format_value(value))
+
     console.print(table)
 
 
