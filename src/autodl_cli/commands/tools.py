@@ -2,7 +2,8 @@
 
 ``request`` sends a raw HTTP request to any URL — the stored token and the
 mandatory ``AppVersion`` header are attached only when the target stays on the
-AutoDL origin — or prints an equivalent curl command.
+AutoDL origin — or prints an equivalent curl command. ``snipe`` watches GPU
+stock and orders the first matching machine.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from autodl_cli import output
 from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
+from autodl_cli.handlers import snipe as snipe_handler
 from autodl_cli.handlers import tools as tools_handler
 
 
@@ -246,6 +248,211 @@ def request(
 
     if not isinstance(status, int) or not 200 <= status < 300:
         ctx.exit(1)
+
+
+def _render_snipe_event(event: dict[str, object]) -> None:
+    """Render one progress event from the snipe handler.
+
+    :param event: Event mapping emitted by
+        :func:`autodl_cli.handlers.snipe.snipe`.
+    """
+    kind = event.get("event")
+    if kind == "poll":
+        output.info(f"Poll #{event.get('attempt', '')}: {event.get('matches', '')} matching machine(s).")
+        return
+    if kind == "poll_failed":
+        output.warning(
+            f"Poll failed: {event.get('error', '')}; retrying ({event.get('retries', '')}/{event.get('limit', '')})."
+        )
+        return
+    if kind == "found":
+        machine = event.get("machine")
+        machine = machine if isinstance(machine, dict) else {}
+        output.info(
+            f"Found {machine.get('gpu_name', '')} on machine {machine.get('machine_id', '')} "
+            f"({machine.get('region_name', '')}); ordering..."
+        )
+        return
+    if kind == "order_failed":
+        output.warning(f"Order failed on machine {event.get('machine_id', '')}: {event.get('error', '')}; retrying.")
+        return
+    if kind == "ordered":
+        machine = event.get("machine")
+        machine = machine if isinstance(machine, dict) else {}
+        output.success(
+            f"Ordered instance {event.get('instance_uuid', '')} on machine "
+            f"{machine.get('machine_id', '')}; waiting for it to start..."
+        )
+        return
+    if kind == "instance_status":
+        status = event.get("status")
+        if status == "not found":
+            output.info("Instance status: not visible yet.")
+        else:
+            output.info(f"Instance status: {status}.")
+        return
+    if kind == "running":
+        output.info("Instance is running.")
+
+
+@tools.command("snipe", help="Watch GPU stock and order a machine as soon as one is available.")
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    metavar="REGION",
+    help="Region sign, data center, or display name to search (repeatable).",
+)
+@click.option(
+    "--gpu",
+    "-g",
+    "gpu_types",
+    multiple=True,
+    metavar="NAME",
+    help="Exact GPU model name to search for (repeatable, case-insensitive).",
+)
+@click.option(
+    "--gpu-num",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of GPUs to request; this narrows the search but does not target it.",
+)
+@click.option(
+    "--max-price",
+    type=click.FloatRange(min=0),
+    default=None,
+    metavar="YUAN/H",
+    help="Maximum pay-as-you-go price in yuan per hour; this narrows the search.",
+)
+@click.option(
+    "--strategy",
+    type=click.Choice(snipe_handler.SNIPE_STRATEGIES),
+    default="price",
+    show_default=True,
+    help="Order matching machines by price, idle capacity, or the first result.",
+)
+@click.option("--image", "-i", "base_image_uuid", default="", help="Base-image UUID from `autodl image list`.")
+@click.option(
+    "--private-image",
+    "private_image_uuid",
+    default="",
+    help="Private-image UUID from `autodl image list-private`.",
+)
+@click.option("--name", "-n", default="", help="Instance name.")
+@click.option(
+    "--data-disk",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Extra data-disk size in GB.",
+)
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=snipe_handler.DEFAULT_INTERVAL,
+    show_default=True,
+    help="Seconds between stock checks.",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=0,
+    show_default=True,
+    help="Give up after this many seconds; 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Retry transient API errors during polling up to this many times; 0 disables retries.",
+)
+@click.pass_context
+def snipe_command(
+    ctx: click.Context,
+    regions: tuple[str, ...],
+    gpu_types: tuple[str, ...],
+    gpu_num: int,
+    max_price: float | None,
+    strategy: str,
+    base_image_uuid: str,
+    private_image_uuid: str,
+    name: str,
+    data_disk: int,
+    interval: float,
+    timeout: float,
+    retry: int,
+) -> None:
+    """Watch GPU stock and order a machine as soon as one is available.
+
+    At least one of ``--region`` and ``--gpu`` is required. ``--max-price`` and
+    ``--gpu-num`` only narrow the search; they do not select a target on their
+    own. Exactly one of ``--image`` and ``--private-image`` must be set. The
+    command blocks until the ordered instance is running or ``--timeout``
+    expires. Transient API errors while polling are retried ``--retry`` times
+    consecutively; authentication errors are never retried and ``0`` disables
+    retries.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param regions: Region identifiers to search; empty means every region.
+    :param gpu_types: Exact GPU model names to search for.
+    :param gpu_num: Number of GPUs to request.
+    :param max_price: Maximum pay-as-you-go price in yuan per hour.
+    :param strategy: Machine ordering: ``price``, ``idle``, or ``first``.
+    :param base_image_uuid: Base-image UUID to boot from.
+    :param private_image_uuid: Private-image UUID to boot from.
+    :param name: Optional instance name.
+    :param data_disk: Extra data-disk size in GB.
+    :param interval: Seconds between stock checks.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0``
+        disables retries.
+    :raises click.UsageError: When no targeting filter or the wrong number of
+        image UUIDs is supplied.
+    :raises click.ClickException: When no token is configured, the request
+        fails, or the snipe times out.
+    """
+    if not regions and not gpu_types:
+        raise click.UsageError("Pass at least one of --region or --gpu.")
+    if bool(base_image_uuid.strip()) == bool(private_image_uuid.strip()):
+        raise click.UsageError("Pass exactly one of --image and --private-image.")
+
+    config = load_config()
+    token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    try:
+        with build_client(token, config) as client:
+            result = snipe_handler.snipe(
+                client,
+                regions=regions,
+                gpu_types=gpu_types,
+                gpu_amount=gpu_num,
+                max_price=max_price,
+                strategy=strategy,
+                base_image_uuid=base_image_uuid,
+                private_image_uuid=private_image_uuid,
+                instance_name=name,
+                expand_data_disk=data_disk,
+                interval=interval,
+                timeout=timeout,
+                retry=retry,
+                on_event=None if as_json else _render_snipe_event,
+            )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        output.render_json(result)
+        return
+
+    output.success(
+        f"Instance {result['instance_uuid']} is running on machine {result['machine_id']} "
+        f"in {result['region_name']} ({result['gpu_name']})."
+    )
+    output.info(f"Check its status with `autodl instance list -q {result['instance_uuid']}`.")
 
 
 def register_tools(main_group: click.Group) -> click.Group:

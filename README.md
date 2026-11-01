@@ -107,6 +107,28 @@ autodl gpu machines --idle 4 --gpu "RTX 4090" --sort price
 autodl gpu machines --charge-type monthly --mount-net-disk --all
 ```
 
+`tools snipe` keeps checking pay-as-you-go stock and orders the first matching
+machine, then waits until the instance reports `running`. Pass at least one
+targeting filter, `--region` or `--gpu`; `--max-price` and `--gpu-num` only
+narrow the search. `--strategy` chooses the cheapest (`price`, the default),
+the most idle cards (`idle`), or the first result returned (`first`), and
+exactly one of `--image` and `--private-image` is required.
+
+```bash
+autodl tools snipe --region nm-B2 --gpu "RTX 3090" --max-price 1.5 --image base-image-ee43618uo7
+autodl tools snipe --gpu "RTX 4090" --gpu-num 2 --private-image image-abcd1234 --interval 5 --timeout 600
+```
+
+Transient API errors during polling (rate limits or 5xx responses) can be
+retried with `--retry N`: up to N consecutive failures are tolerated per poll
+and the counter resets after a successful check. Authentication errors are
+never retried, and `--retry 0` (the default) disables retries. Order failures
+already retry indefinitely.
+
+```bash
+autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --retry 3 --interval 5
+```
+
 ### 🖼️ Base Images
 
 The create page's image picker is a four-level tree: framework, framework
