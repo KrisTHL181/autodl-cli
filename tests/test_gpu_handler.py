@@ -595,11 +595,11 @@ NORMALIZED_MACHINE = {
     "mount_net_disk": False,
     "enable_container_pro": True,
     "machine_tags": [],
-    "payg_price": 1660,
-    "daily_price": 38650,
-    "weekly_price": 262000,
-    "monthly_price": 867000,
-    "yearly_price": 0,
+    "payg_price": 1.66,
+    "daily_price": 38.65,
+    "weekly_price": 262.0,
+    "monthly_price": 867.0,
+    "yearly_price": 0.0,
     "description": "",
     "rent_deadline": "2027-10-01T00:00:00+08:00",
 }
@@ -722,7 +722,7 @@ def test_list_machines_sorts_price_locally_across_every_page() -> None:
 
     assert [body["page_index"] for body in requested] == [1, 2]
     assert all(body["page_size"] == gpu_handler.FULL_FETCH_PAGE_SIZE for body in requested)
-    assert [machine["payg_price"] for machine in page["machines"]] == [50, 100, 200, 300]
+    assert [machine["payg_price"] for machine in page["machines"]] == [0.05, 0.1, 0.2, 0.3]
     assert page["page_index"] == 1
     assert page["page_size"] == gpu_handler.DEFAULT_MACHINE_PAGE_SIZE
     assert page["max_page"] == 1
@@ -752,7 +752,7 @@ def test_list_machines_sorted_page_is_sliced_locally() -> None:
         )
 
     assert requested == [1, 2]
-    assert [machine["payg_price"] for machine in page["machines"]] == [100, 50]
+    assert [machine["payg_price"] for machine in page["machines"]] == [0.1, 0.05]
     assert page["page_index"] == 2
     assert page["page_size"] == 2
     assert page["max_page"] == 2
@@ -872,13 +872,13 @@ def test_list_machines_idle_sort_all_pages_sorts_locally() -> None:
 @pytest.mark.parametrize(
     ("sort_order", "expected"),
     [
-        ("asc", [100, 200, None]),
-        ("desc", [200, 100, None]),
+        ("asc", [0.1, 0.2, None]),
+        ("desc", [0.2, 0.1, None]),
     ],
 )
 def test_list_machines_sort_keeps_missing_values_last(
     sort_order: str,
-    expected: list[int | None],
+    expected: list[float | None],
 ) -> None:
     """Machines without the sort field stay at the end in both directions."""
     records = [
@@ -911,7 +911,7 @@ def test_list_machines_sorted_all_pages_returns_every_machine() -> None:
             all_pages=True,
         )
 
-    assert [machine["payg_price"] for machine in page["machines"]] == [100, 300]
+    assert [machine["payg_price"] for machine in page["machines"]] == [0.1, 0.3]
     assert page["page_index"] == 1
     assert page["page_size"] == 1
     assert page["max_page"] == 2
@@ -1105,5 +1105,5 @@ def test_normalize_machine_collects_tags_and_sku_prices() -> None:
     )
 
     assert machine["machine_tags"] == ["高配", "直连"]
-    assert machine["payg_price"] == 1234
+    assert machine["payg_price"] == 1.234
     assert machine["daily_price"] is None

@@ -40,8 +40,8 @@ INSTANCES = [
         "usage_info": {"data_disk_used_size": 94, "data_disk_total_size": 100},
         "disk_health_status": "normal",
         "charge_type": "payg",
-        "payg_price": 1480,
-        "daily_price": 0,
+        "payg_price": 1.48,
+        "daily_price": 0.0,
         "rent_deadline": "2027-07-01T00:00:00+08:00",
         "timed_shutdown_at": {"Time": "2026-11-30T00:00:00+08:00", "Valid": True},
         "expired_at": {"Time": "0001-01-01T00:00:00Z", "Valid": False},
@@ -65,8 +65,8 @@ INSTANCES = [
         "usage_info": {"data_disk_used_size": 50, "data_disk_total_size": 100},
         "disk_health_status": "normal",
         "charge_type": "payg",
-        "payg_price": 3250,
-        "daily_price": 0,
+        "payg_price": 3.25,
+        "daily_price": 0.0,
         "rent_deadline": "2027-05-01T00:00:00+08:00",
         "timed_shutdown_at": {"Time": "0001-01-01T00:00:00Z", "Valid": False},
         "expired_at": {"Time": "0001-01-01T00:00:00Z", "Valid": False},
@@ -89,8 +89,8 @@ DETAIL = {
         "cuda_version": "13.0",
         "cpu_arch": "x86",
     },
-    "payg_price": 1480,
-    "origin_pay_price": 1560,
+    "payg_price": 1.48,
+    "origin_pay_price": 1.56,
     "snapshot_gpu_alias_name": "RTX 3090",
     "user_define_gpu_name": "",
     "chip_corp": "nvidia",
@@ -135,8 +135,8 @@ def _seed_token() -> None:
     config_module.save_config({"token": TOKEN})
 
 
-def test_list_json_returns_raw_instances(home: Path, monkeypatch) -> None:
-    """``--json`` emits the handler result unchanged."""
+def test_list_json_returns_instance_data(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler's yuan-priced result unchanged."""
     _seed_token()
     monkeypatch.setattr(
         instance_commands.instance_handler,
@@ -412,8 +412,8 @@ def test_list_rejects_page_size_above_server_limit(home: Path, monkeypatch) -> N
     assert "101" in result.output
 
 
-def test_detail_json_returns_raw_snapshot(home: Path, monkeypatch) -> None:
-    """``--json`` emits the handler result unchanged."""
+def test_detail_json_returns_snapshot(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler's yuan-priced snapshot unchanged."""
     _seed_token()
     monkeypatch.setattr(
         instance_commands.instance_handler,

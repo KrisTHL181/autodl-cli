@@ -81,8 +81,9 @@ autodl account balance     # how much credit is left?
 
 ### 👤 Account
 
-Inspect the authenticated profile and wallet. Balances are rendered in yuan;
-`--json` returns the API's raw thousandths-of-a-yuan integers instead.
+Inspect the authenticated profile and wallet. Both the table and `--json`
+report money values in yuan, using the API's field names (for example
+`assets` and `payg_price`).
 
 ```bash
 autodl account me

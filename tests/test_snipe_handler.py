@@ -164,8 +164,8 @@ def _select_all(machines: list[dict[str, object]], *, strategy: str) -> list[str
 def test_select_machine_requires_enough_idle_cards() -> None:
     """Machines with fewer idle GPUs than requested are dropped."""
     machines = [
-        {"machine_id": "m-1", "gpu_name": "RTX 3090", "gpu_idle_num": 1, "payg_price": 1000},
-        {"machine_id": "m-2", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 1000},
+        {"machine_id": "m-1", "gpu_name": "RTX 3090", "gpu_idle_num": 1, "payg_price": 1.0},
+        {"machine_id": "m-2", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 1.0},
     ]
 
     assert snipe_module.select_machine(machines, gpu_amount=2) == machines[1]
@@ -174,8 +174,8 @@ def test_select_machine_requires_enough_idle_cards() -> None:
 def test_select_machine_matches_gpu_name_exactly_and_case_insensitively() -> None:
     """GPU names are stripped and case-folded, but never substring-matched."""
     machines = [
-        {"machine_id": "m-exact", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1000},
-        {"machine_id": "m-ti", "gpu_name": "RTX 3090 Ti", "gpu_idle_num": 8, "payg_price": 1000},
+        {"machine_id": "m-exact", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1.0},
+        {"machine_id": "m-ti", "gpu_name": "RTX 3090 Ti", "gpu_idle_num": 8, "payg_price": 1.0},
     ]
 
     chosen = snipe_module.select_machine(machines, gpu_types=(" rtx 3090 ",))
@@ -187,8 +187,8 @@ def test_select_machine_matches_gpu_name_exactly_and_case_insensitively() -> Non
 def test_select_machine_applies_max_price_and_excludes_missing_prices() -> None:
     """A price limit drops expensive machines and machines without a price."""
     machines = [
-        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1400},
-        {"machine_id": "m-pricey", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1600},
+        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1.4},
+        {"machine_id": "m-pricey", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1.6},
         {"machine_id": "m-unknown", "gpu_name": "RTX 3090", "gpu_idle_num": 8},
     ]
 
@@ -198,10 +198,10 @@ def test_select_machine_applies_max_price_and_excludes_missing_prices() -> None:
 def test_select_machine_price_strategy_ordering() -> None:
     """``price`` sorts by price, then idle GPUs descending, then machine ID."""
     machines = [
-        {"machine_id": "m-slow", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 2000},
-        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 1000},
-        {"machine_id": "m-cheap2", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1000},
-        {"machine_id": "m-aaa", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1000},
+        {"machine_id": "m-slow", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 2.0},
+        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 1.0},
+        {"machine_id": "m-cheap2", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1.0},
+        {"machine_id": "m-aaa", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1.0},
         {"machine_id": "m-none", "gpu_name": "RTX 3090", "gpu_idle_num": 8},
     ]
 
@@ -217,11 +217,11 @@ def test_select_machine_price_strategy_ordering() -> None:
 def test_select_machine_idle_strategy_ordering() -> None:
     """``idle`` sorts by idle GPUs descending, then price ascending, then ID."""
     machines = [
-        {"machine_id": "m-a", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 3000},
-        {"machine_id": "m-b", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1000},
-        {"machine_id": "m-aa", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1000},
+        {"machine_id": "m-a", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 3.0},
+        {"machine_id": "m-b", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1.0},
+        {"machine_id": "m-aa", "gpu_name": "RTX 3090", "gpu_idle_num": 4, "payg_price": 1.0},
         {"machine_id": "m-c", "gpu_name": "RTX 3090", "gpu_idle_num": 8},
-        {"machine_id": "m-d", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 2000},
+        {"machine_id": "m-d", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 2.0},
     ]
 
     assert _select_all(machines, strategy="idle") == ["m-d", "m-c", "m-aa", "m-b", "m-a"]
@@ -230,8 +230,8 @@ def test_select_machine_idle_strategy_ordering() -> None:
 def test_select_machine_first_strategy_keeps_input_order() -> None:
     """``first`` returns the first candidate without reordering."""
     machines = [
-        {"machine_id": "m-expensive", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 3000},
-        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1000},
+        {"machine_id": "m-expensive", "gpu_name": "RTX 3090", "gpu_idle_num": 2, "payg_price": 3.0},
+        {"machine_id": "m-cheap", "gpu_name": "RTX 3090", "gpu_idle_num": 8, "payg_price": 1.0},
     ]
 
     assert _select_all(machines, strategy="first") == ["m-expensive", "m-cheap"]
@@ -296,7 +296,7 @@ def test_snipe_orders_after_an_empty_poll_and_waits_for_running(fake_wait) -> No
         "region_sign": "west-B",
         "gpu_name": "RTX 3090",
         "gpu_idle_num": 2,
-        "payg_price": 1480,
+        "payg_price": 1.48,
         "gpu_amount": 1,
         "charge_type": "payg",
         "base_image_uuid": BASE_IMAGE,
@@ -373,7 +373,7 @@ def test_snipe_max_price_waits_for_a_cheaper_machine(fake_wait) -> None:
         )
 
     assert result["machine_id"] == "m-cheap"
-    assert result["payg_price"] == 1200
+    assert result["payg_price"] == 1.2
     assert result["attempts"] == 2
     assert created_machine_ids == ["m-cheap"]
     assert [event["matches"] for event in events if event["event"] == "poll"] == [0, 1]

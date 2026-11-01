@@ -28,6 +28,15 @@ BALANCE = {
     "total_recharge_asset": 500000,
     "exclusive_transfer_account": "",
 }
+BALANCE_YUAN = {
+    **BALANCE,
+    "assets": 12.345,
+    "blocked_asset": 0.0,
+    "accumulate": 67.89,
+    "voucher_balance": 1.0,
+    "certain_conditions_voucher_balance": 0.0,
+    "total_recharge_asset": 500.0,
+}
 ACCOUNT = {
     "id": 42,
     "username": "tester",
@@ -70,7 +79,7 @@ def test_get_balance_requests_wallet_endpoint() -> None:
         return _success(BALANCE)
 
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
-        assert account_handler.get_balance(client) == BALANCE
+        assert account_handler.get_balance(client) == BALANCE_YUAN
 
     assert seen == {
         "method": "GET",

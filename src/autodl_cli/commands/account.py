@@ -1,8 +1,8 @@
 """``autodl account`` — account-level commands.
 
 Exposes the authenticated account profile and the wallet balance. The balance
-handler returns AutoDL's raw thousandths-of-a-yuan values; the human-readable
-view converts them to yuan while ``--json`` preserves the API shape.
+handler already converts AutoDL's money values to yuan, so both the
+human-readable view and ``--json`` report yuan with the API's field names.
 """
 
 from __future__ import annotations

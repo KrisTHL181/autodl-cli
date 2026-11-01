@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 from autodl_cli.errors import APIError
 from autodl_cli.handlers import gpu as gpu_handler
 from autodl_cli.handlers._common import require_success, require_success_any
+from autodl_cli.money import PRICE_FIELDS, to_yuan
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -159,6 +160,26 @@ def _matches_query(instance: dict[str, object], needle: str) -> bool:
     return False
 
 
+def _with_yuan_prices(entry: dict[str, object]) -> dict[str, object]:
+    """Return a shallow copy with integer price fields converted to yuan.
+
+    AutoDL reports prices in a smaller integer unit. Fields from
+    :data:`autodl_cli.money.PRICE_FIELDS` are exposed in yuan instead; absent
+    fields and non-integer values are left untouched.
+
+    :param entry: One raw instance or snapshot mapping from the API.
+    :returns: A shallow copy with yuan price fields.
+    """
+    converted = dict(entry)
+    for field in PRICE_FIELDS:
+        if field not in converted:
+            continue
+        yuan = to_yuan(converted[field])
+        if yuan is not None:
+            converted[field] = yuan
+    return converted
+
+
 def list_instances(
     client: AutoDLClient,
     *,
@@ -189,6 +210,7 @@ def list_instances(
     :param query: Only return instances whose UUID, name, region, machine alias,
         or GPU name contains this text; empty means no filtering.
     :returns: One mapping per instance, in the order AutoDL returns them.
+        Price fields are yuan floats.
     :raises ValueError: When ``page_size`` is not positive.
     :raises autodl_cli.errors.AuthError: When the token is rejected.
     :raises autodl_cli.errors.APIError: When the API reports a failure or
@@ -222,20 +244,20 @@ def list_instances(
     needle = query.strip().casefold()
     if needle:
         instances = [instance for instance in instances if _matches_query(instance, needle)]
-    return instances
+    return [_with_yuan_prices(instance) for instance in instances]
 
 
 def get_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     """Return one instance's configuration snapshot.
 
     The snapshot names the instance's base image, GPU allocation, and host
-    machine, and repeats the machine's stock prices. It carries no live status
-    or connection details, so pair it with :func:`list_instances` when those are
-    needed.
+    machine, and repeats the machine's stock prices in yuan. It carries no live
+    status or connection details, so pair it with :func:`list_instances` when
+    those are needed.
 
     :param client: Authenticated API client.
     :param instance_id: Instance UUID from :func:`list_instances`.
-    :returns: The snapshot mapping.
+    :returns: The snapshot mapping, with price fields as yuan floats.
     :raises autodl_cli.errors.AuthError: When the token is rejected.
     :raises autodl_cli.errors.APIError: When the API reports a failure or
         returns malformed data.
@@ -245,7 +267,7 @@ def get_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
         INSTANCE_DETAIL_PATH,
         params={"instance_uuid": instance_id},
     )
-    return require_success(payload, action="instance detail")
+    return _with_yuan_prices(require_success(payload, action="instance detail"))
 
 
 def create_instance(

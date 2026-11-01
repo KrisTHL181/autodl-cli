@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
 from autodl_cli.handlers._common import require_success, require_success_list
+from autodl_cli.money import to_yuan
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -366,15 +367,16 @@ def _integer(entry: dict[str, object], key: str) -> int | None:
     return None
 
 
-def _machine_prices(entry: dict[str, object]) -> dict[str, int]:
-    """Collect the machine's prices by billing mode.
+def _machine_prices(entry: dict[str, object]) -> dict[str, float]:
+    """Collect the machine's prices by billing mode, in yuan.
 
     ``machine_sku_info`` is the authoritative source; the top-level
     ``payg_price`` is used as a fallback for ``payg`` when the SKU list omits
-    it.
+    it. The API reports both in a raw integer unit; the result is converted to
+    yuan.
 
     :param entry: Machine record from the API.
-    :returns: Billing mode to price mapping, in raw thousandths of a yuan.
+    :returns: Billing mode to price mapping, in yuan per billing period.
     """
     prices: dict[str, int] = {}
     skus = entry.get("machine_sku_info")
@@ -389,7 +391,13 @@ def _machine_prices(entry: dict[str, object]) -> dict[str, int]:
     payg = _integer(entry, "payg_price")
     if payg is not None:
         prices["payg"] = payg
-    return prices
+
+    converted: dict[str, float] = {}
+    for kind, price in prices.items():
+        yuan = to_yuan(price)
+        if yuan is not None:
+            converted[kind] = yuan
+    return converted
 
 
 def _machine_tags(entry: dict[str, object]) -> list[str]:
@@ -418,7 +426,7 @@ def _normalize_machine(entry: object) -> dict[str, object]:
     """Flatten one machine record into the fields the CLI needs.
 
     ``machine_base_info`` and ``machine_sku_info`` are folded into the result;
-    nested objects are not preserved.
+    nested objects are not preserved. Price fields are yuan floats.
 
     :param entry: One element of the endpoint's ``list`` array.
     :returns: A flat machine mapping.
@@ -726,9 +734,9 @@ def _sort_machines(
     missing: list[dict[str, object]] = []
     for machine in machines:
         value = machine.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             present.append(machine)
         else:
             missing.append(machine)
-    present.sort(key=lambda machine: int(machine[key]), reverse=sort_order == "desc")
+    present.sort(key=lambda machine: float(machine[key]), reverse=sort_order == "desc")
     return present + missing

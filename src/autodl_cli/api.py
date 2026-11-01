@@ -72,7 +72,7 @@ def get_balance(token: str, *, charge_type: str = "payg") -> dict[str, object]:
 
     :param token: AutoDL API token obtained by logging in.
     :param charge_type: Billing mode to query, ``"payg"`` by default.
-    :returns: The wallet mapping; monetary fields are raw thousandths of a yuan.
+    :returns: The wallet mapping; monetary fields are yuan floats.
     :raises autodl_cli.errors.AutoDLError: For every authentication or API
         failure.
     """
@@ -184,7 +184,7 @@ def list_instances(
     :param unbind_sub_user: Only return instances with no bound sub-user.
     :param query: Only return instances matching this text; empty means no
         filtering.
-    :returns: One mapping per instance.
+    :returns: One mapping per instance; price fields are yuan floats.
     :raises autodl_cli.errors.AutoDLError: For every authentication or API
         failure.
     """
@@ -204,11 +204,11 @@ def get_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """Return one instance's configuration snapshot.
 
     The snapshot describes the base image, GPU allocation, host machine, and
-    prices. It does not include the live status or connection details.
+    prices in yuan. It does not include the live status or connection details.
 
     :param token: AutoDL API token, typically copied from a browser session.
     :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
-    :returns: The snapshot mapping.
+    :returns: The snapshot mapping; price fields are yuan floats.
     :raises autodl_cli.errors.AutoDLError: For every authentication or API
         failure.
     """

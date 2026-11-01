@@ -21,6 +21,8 @@ from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TimeR
 from rich.table import Table
 from rich.text import Text
 
+from autodl_cli.money import BALANCE_MONEY_FIELDS
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
@@ -163,33 +165,18 @@ _BALANCE_LABELS: tuple[tuple[str, str], ...] = (
     ("to_expire_voucher_num", "Expiring vouchers"),
 )
 
-#: Balance fields expressed in thousandths of a yuan.
-_BALANCE_MONEY_FIELDS = frozenset(
-    {
-        "assets",
-        "blocked_asset",
-        "voucher_balance",
-        "certain_conditions_voucher_balance",
-        "accumulate",
-        "total_recharge_asset",
-    }
-)
-
 
 def _format_yuan(value: object) -> str:
-    """Format a thousandths-of-a-yuan integer as a yuan amount.
+    """Format a yuan value.
 
-    :param value: Raw value from the wallet response.
-    :returns: A ``¥`` prefixed amount, or ``"-"`` when the value is not numeric.
+    :param value: Yuan amount from the handler.
+    :returns: A ``¥`` prefixed amount with three decimals, or ``"-"`` when the
+        value is not numeric. Negative amounts read ``-¥…``.
     """
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "-"
-    if isinstance(value, int):
-        sign = "-" if value < 0 else ""
-        return f"{sign}¥{abs(value) // 1000}.{abs(value) % 1000:03d}"
-    if isinstance(value, float):
-        return f"¥{value / 1000:.3f}"
-    return "-"
+    sign = "-" if value < 0 else ""
+    return f"{sign}¥{abs(value):.3f}"
 
 
 def _format_value(value: object) -> str:
@@ -234,8 +221,8 @@ def _count_cell(value: object, *, alert_zero: bool = False) -> Text:
 def render_balance(balance: dict[str, object], *, charge_type: str | None = None) -> None:
     """Render a wallet balance as a Rich table.
 
-    Money fields are shown in yuan; ``--json`` callers receive the raw response
-    instead, so no information is lost.
+    Money fields arrive from the handler as yuan floats; ``--json`` callers
+    receive the same values.
 
     :param balance: The wallet mapping returned by the API handler.
     :param charge_type: Billing mode included in the table title, when known.
@@ -250,7 +237,7 @@ def render_balance(balance: dict[str, object], *, charge_type: str | None = None
         if key not in balance:
             continue
         value = balance[key]
-        if key in _BALANCE_MONEY_FIELDS:
+        if key in BALANCE_MONEY_FIELDS:
             rendered = _styled(_format_yuan(value), _STYLE_MONEY)
         else:
             rendered = _styled(_format_value(value), _STYLE_NUM)
@@ -509,10 +496,10 @@ def _format_instance_price(instance: dict[str, object]) -> str:
         reported.
     """
     payg_price = instance.get("payg_price")
-    if isinstance(payg_price, int) and not isinstance(payg_price, bool) and payg_price > 0:
+    if isinstance(payg_price, (int, float)) and not isinstance(payg_price, bool) and payg_price > 0:
         return f"{_format_yuan(payg_price)}/h"
     daily_price = instance.get("daily_price")
-    if isinstance(daily_price, int) and not isinstance(daily_price, bool) and daily_price > 0:
+    if isinstance(daily_price, (int, float)) and not isinstance(daily_price, bool) and daily_price > 0:
         return f"{_format_yuan(daily_price)}/day"
     return "-"
 
@@ -936,12 +923,12 @@ def _format_detail_price(detail: dict[str, object]) -> str:
         reported.
     """
     price = detail.get("payg_price")
-    if isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+    if isinstance(price, bool) or not isinstance(price, (int, float)) or price <= 0:
         return "-"
 
     text = f"{_format_yuan(price)}/h"
     origin = detail.get("origin_pay_price")
-    if isinstance(origin, int) and not isinstance(origin, bool) and origin > 0 and origin != price:
+    if isinstance(origin, (int, float)) and not isinstance(origin, bool) and origin > 0 and origin != price:
         text = f"{text} (list {_format_yuan(origin)}/h)"
     return text
 
@@ -1064,9 +1051,8 @@ def render_instance_detail(detail: dict[str, object], *, instance_uuid: str | No
     """Render one instance's configuration snapshot as a Rich table.
 
     Fields are grouped into Instance, Image, and Machine sections; a section is
-    omitted when every field in it is missing. Values are kept human-readable
-    (yuan prices, GiB sizes), so ``--json`` callers receive the untouched API
-    response instead.
+    omitted when every field in it is missing. Prices arrive from the handler
+    as yuan floats, and ``--json`` callers receive the same values.
 
     :param detail: Snapshot mapping returned by
         :func:`autodl_cli.handlers.instance.get_instance`.
@@ -1656,7 +1642,7 @@ def _format_machine_spec(machine: dict[str, object]) -> str:
 
 
 def _format_machine_price(machine: dict[str, object], key: str) -> str:
-    """Format a raw thousandths-of-a-yuan price.
+    """Format a machine price, which the handler reports in yuan.
 
     :param machine: One machine mapping.
     :param key: Price field name.

@@ -55,6 +55,7 @@ SNAPSHOT = {
         "gpu_type": {"name": "RTX 3090", "memory": 25769803776},
     },
 }
+SNAPSHOT_YUAN = {**SNAPSHOT, "payg_price": 1.48, "origin_pay_price": 1.56}
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -199,6 +200,22 @@ def test_list_instances_empty_result() -> None:
     assert seen == [1]
 
 
+def test_list_instances_converts_price_fields_to_yuan() -> None:
+    """Integer price fields become yuan floats; the API response is not mutated."""
+    entry = {**INSTANCES[0], "payg_price": 1480, "daily_price": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([entry]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.list_instances(client)
+
+    assert result[0]["payg_price"] == 1.48
+    assert result[0]["daily_price"] == 0.0
+    assert result[0]["uuid"] == INSTANCES[0]["uuid"]
+    assert entry["payg_price"] == 1480
+
+
 def test_list_instances_rejects_non_positive_page_size() -> None:
     """A non-positive page size fails before any request is sent."""
 
@@ -309,7 +326,7 @@ def test_get_instance_requests_snapshot_endpoint() -> None:
         return _success(SNAPSHOT)
 
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
-        assert instance_handler.get_instance(client, INSTANCE_UUID) == SNAPSHOT
+        assert instance_handler.get_instance(client, INSTANCE_UUID) == SNAPSHOT_YUAN
 
     assert seen == {
         "method": "GET",

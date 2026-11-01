@@ -15,14 +15,14 @@ from autodl_cli.main import main
 
 TOKEN = "fake-token"
 BALANCE = {
-    "assets": 12345,
-    "blocked_asset": 0,
-    "accumulate": 67890,
-    "voucher_balance": 1000,
+    "assets": 12.345,
+    "blocked_asset": 0.0,
+    "accumulate": 67.89,
+    "voucher_balance": 1.0,
     "available_coupon_num": 2,
     "to_expire_voucher_num": 1,
-    "certain_conditions_voucher_balance": 0,
-    "total_recharge_asset": 500000,
+    "certain_conditions_voucher_balance": 0.0,
+    "total_recharge_asset": 500.0,
 }
 ACCOUNT = {
     "id": 751375,
@@ -58,8 +58,8 @@ def _seed_token() -> None:
     config_module.save_config({"token": TOKEN})
 
 
-def test_balance_json_returns_raw_api_data(home: Path, monkeypatch) -> None:
-    """``--json`` emits the handler result unchanged."""
+def test_balance_json_returns_yuan_data(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler's yuan values unchanged."""
     _seed_token()
     monkeypatch.setattr(
         account_commands.account_handler,
@@ -73,8 +73,8 @@ def test_balance_json_returns_raw_api_data(home: Path, monkeypatch) -> None:
     assert json.loads(result.output) == BALANCE
 
 
-def test_balance_human_output_converts_money_to_yuan(home: Path, monkeypatch) -> None:
-    """The table shows labels and yuan amounts rather than raw integers."""
+def test_balance_human_output_shows_yuan_amounts(home: Path, monkeypatch) -> None:
+    """The table shows labels and the handler's yuan amounts."""
     _seed_token()
     monkeypatch.setattr(
         account_commands.account_handler,

@@ -72,16 +72,16 @@ def _idle_count(machine: dict[str, object]) -> int:
     return 0
 
 
-def _price_key(machine: dict[str, object]) -> tuple[bool, int]:
+def _price_key(machine: dict[str, object]) -> tuple[bool, float]:
     """Build the price sort key, placing machines without a price last.
 
-    :param machine: One normalised machine mapping.
+    :param machine: One normalised machine mapping; prices are yuan floats.
     :returns: ``(missing, price)`` for ascending price ordering.
     """
     value = machine.get("payg_price")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return (False, value)
-    return (True, 0)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (False, float(value))
+    return (True, 0.0)
 
 
 def _machine_id_key(machine: dict[str, object]) -> str:
@@ -104,7 +104,7 @@ def _filter_and_sort(
 ) -> list[dict[str, object]]:
     """Filter machines by the snipe criteria and rank the survivors.
 
-    :param machines: Normalised machine mappings.
+    :param machines: Normalised machine mappings; prices are yuan floats.
     :param gpu_types: Exact GPU names to keep, matched case-insensitively after
         stripping; empty means every model.
     :param gpu_amount: Minimum number of idle GPUs per machine.
@@ -122,7 +122,6 @@ def _filter_and_sort(
         raise ValueError(f"strategy must be one of {', '.join(SNIPE_STRATEGIES)}")
 
     wanted = {name.strip().casefold() for name in gpu_types if name.strip()}
-    limit = round(max_price * 1000) if max_price is not None else None
 
     candidates: list[dict[str, object]] = []
     for machine in machines:
@@ -134,9 +133,9 @@ def _filter_and_sort(
             gpu_name = machine.get("gpu_name")
             if not isinstance(gpu_name, str) or gpu_name.strip().casefold() not in wanted:
                 continue
-        if limit is not None:
+        if max_price is not None:
             price = machine.get("payg_price")
-            if isinstance(price, bool) or not isinstance(price, int) or price > limit:
+            if isinstance(price, bool) or not isinstance(price, (int, float)) or price > max_price:
                 continue
         candidates.append(machine)
 
@@ -158,8 +157,9 @@ def select_machine(
     """Choose the best matching machine from a listing.
 
     A non-empty ``gpu_types`` requires an exact, case-insensitive GPU-name
-    match after stripping whitespace; it is not a substring match. Machines
-    without an integer ``payg_price`` are excluded when ``max_price`` is set.
+    match after stripping whitespace; it is not a substring match. Machine
+    ``payg_price`` values are yuan floats, and machines without a numeric price
+    are excluded when ``max_price`` is set.
 
     ``price`` orders by hourly price ascending (missing prices last), then by
     idle GPUs descending, then machine ID. ``idle`` orders by idle GPUs

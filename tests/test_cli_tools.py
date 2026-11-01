@@ -293,7 +293,7 @@ SNIPE_RESULT = {
     "region_sign": "west-B",
     "gpu_name": "RTX 3090",
     "gpu_idle_num": 2,
-    "payg_price": 1480,
+    "payg_price": 1.48,
     "gpu_amount": 1,
     "charge_type": "payg",
     "base_image_uuid": "base-image-x",
