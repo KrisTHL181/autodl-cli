@@ -380,7 +380,7 @@ def test_snipe_max_price_waits_for_a_cheaper_machine(fake_wait) -> None:
 
 
 def test_snipe_retries_after_a_failed_order(fake_wait) -> None:
-    """A rejected order emits ``order_failed`` and the next poll tries again."""
+    """A rejected order cools the machine down, then the next poll retries it."""
     create_calls: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -411,16 +411,108 @@ def test_snipe_retries_after_a_failed_order(fake_wait) -> None:
         "found",
         "order_failed",
         "poll",
+        "poll",
         "found",
         "ordered",
         "instance_status",
         "running",
     ]
     assert events[2]["machine_id"] == "m-1"
+    assert events[2]["failures"] == 1
+    assert events[2]["backoff"] == 5.0
     assert "no capacity" in str(events[2]["error"])
+    assert events[3]["matches"] == 0
+    assert events[3]["cooling"] == 1
     assert len(create_calls) == 2
+    assert result["attempts"] == 3
+    assert result["status"] == "running"
+
+
+def test_snipe_tries_another_machine_while_the_failed_one_cools_down(fake_wait) -> None:
+    """A rejected machine is skipped, so the next best candidate is ordered."""
+    _, delays = fake_wait
+    created_machine_ids: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            machines = [_machine("m-cheap", price=1000), _machine("m-other", price=2000)]
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            created_machine_ids.append(machine_id)
+            if machine_id == "m-cheap":
+                return _failure("当前主机存储库存已满")
+            return _success(INSTANCE_UUID)
+        if path == "/api/v1/instance":
+            return _success(_instance_page([{"uuid": INSTANCE_UUID, "status": "running"}]))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert created_machine_ids == ["m-cheap", "m-other"]
+    assert result["machine_id"] == "m-other"
     assert result["attempts"] == 2
     assert result["status"] == "running"
+    polls = [event for event in events if event["event"] == "poll"]
+    assert [poll["matches"] for poll in polls] == [2, 1]
+    assert [poll["cooling"] for poll in polls] == [0, 1]
+    assert delays == []
+
+
+def test_snipe_backs_off_exponentially_for_a_machine_that_keeps_failing(fake_wait) -> None:
+    """Consecutive rejections double the cooldown before the machine is retried."""
+    _, delays = fake_wait
+    create_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_calls
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page([_machine("m-1")]))
+        if path == "/api/v1/order/instance/create/payg":
+            create_calls += 1
+            if create_calls <= 2:
+                return _failure("no capacity")
+            return _success(INSTANCE_UUID)
+        if path == "/api/v1/instance":
+            return _success(_instance_page([{"uuid": INSTANCE_UUID, "status": "running"}]))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    failed = [event for event in events if event["event"] == "order_failed"]
+    assert [event["failures"] for event in failed] == [1, 2]
+    assert [event["backoff"] for event in failed] == [5.0, 10.0]
+    assert create_calls == 3
+    assert result["attempts"] == 6
+    assert result["status"] == "running"
+    assert delays == [5.0, 5.0, 5.0]
+
+
+@pytest.mark.parametrize(
+    ("failures", "expected"),
+    [(1, 5.0), (2, 10.0), (3, 20.0), (4, 40.0), (5, 40.0), (100, 40.0)],
+)
+def test_order_backoff_doubles_up_to_the_cap(failures: int, expected: float) -> None:
+    """The cooldown starts at one interval, doubles, and stops at eight intervals."""
+    assert snipe_module._order_backoff(5.0, failures) == expected
 
 
 def test_snipe_times_out_before_ordering(fake_wait) -> None:

@@ -32,6 +32,14 @@ DEFAULT_INTERVAL = 10.0
 #: Ordering strategies accepted by :func:`select_machine` and :func:`snipe`.
 SNIPE_STRATEGIES = ("price", "idle", "first")
 
+#: Multiplier applied to the polling interval after each consecutive order
+#: failure on the same machine.
+ORDER_BACKOFF_FACTOR = 2.0
+
+#: Ceiling for a machine's order-failure cooldown, as a multiple of the
+#: polling interval.
+MAX_ORDER_BACKOFF_MULTIPLE = 8.0
+
 #: Instance statuses that mean the newly ordered instance will never start.
 FAILED_INSTANCE_STATUSES = frozenset({"failed", "error", "exception", "released"})
 
@@ -92,6 +100,19 @@ def _machine_id_key(machine: dict[str, object]) -> str:
     """
     value = machine.get("machine_id")
     return value if isinstance(value, str) else ""
+
+
+def _order_backoff(interval: float, failures: int) -> float:
+    """Return how long a machine stays out of the candidate set after a rejection.
+
+    The cooldown starts at one polling interval and doubles with every
+    consecutive failure, capped at :data:`MAX_ORDER_BACKOFF_MULTIPLE` intervals.
+
+    :param interval: Polling interval in seconds.
+    :param failures: Consecutive order failures for the machine; at least 1.
+    :returns: Cooldown in seconds.
+    """
+    return min(interval * ORDER_BACKOFF_FACTOR ** (failures - 1), interval * MAX_ORDER_BACKOFF_MULTIPLE)
 
 
 def _filter_and_sort(
@@ -301,11 +322,18 @@ def snipe(
     searches every region. ``max_price`` and a larger ``gpu_amount`` only
     narrow the search. ``retry`` limits consecutive transient API errors while
     polling; authentication errors are never retried. Failed orders (except
-    :class:`~autodl_cli.errors.AuthError`) keep their unlimited retry.
+    :class:`~autodl_cli.errors.AuthError`) are retried indefinitely, but each
+    rejected machine is excluded for a cooldown that starts at one ``interval``
+    and doubles per consecutive failure on that machine (see
+    :func:`_order_backoff`), so another matching machine is tried next and a
+    persistently broken machine is not hammered every poll.
 
     Events are mappings whose ``event`` key is ``poll``, ``poll_failed``,
     ``found``, ``order_failed``, ``ordered``, ``instance_status``, or
-    ``running``.
+    ``running``. ``poll`` reports how many candidates are selectable
+    (``matches``) and how many are cooling down after a rejected order
+    (``cooling``); ``order_failed`` reports the machine's consecutive failure
+    count (``failures``) and the cooldown in seconds (``backoff``).
 
     :param client: Authenticated API client.
     :param regions: Region signs, data centers, or display names to search.
@@ -374,6 +402,8 @@ def snipe(
     machine: dict[str, object] | None = None
     order: dict[str, object] | None = None
     instance_uuid = ""
+    order_failures: dict[str, int] = {}
+    cooldowns: dict[str, float] = {}
 
     while True:
         attempt += 1
@@ -403,14 +433,24 @@ def snipe(
             max_price=max_price,
             strategy=strategy,
         )
-        _emit(on_event, {"event": "poll", "attempt": attempt, "matches": len(candidates)})
+        now = _now()
+        ready = [candidate for candidate in candidates if cooldowns.get(_machine_id_key(candidate), 0.0) <= now]
+        _emit(
+            on_event,
+            {
+                "event": "poll",
+                "attempt": attempt,
+                "matches": len(ready),
+                "cooling": len(candidates) - len(ready),
+            },
+        )
 
-        if not candidates:
+        if not ready:
             _raise_if_timed_out(deadline, timeout=timeout, reason="without ordering an instance")
             wait(interval)
             continue
 
-        machine = candidates[0]
+        machine = ready[0]
         _emit(on_event, {"event": "found", "machine": machine})
         try:
             order = instance_handler.create_instance(
@@ -425,16 +465,22 @@ def snipe(
         except AuthError:
             raise
         except AutoDLError as exc:
+            machine_key = _machine_id_key(machine)
+            failures = order_failures.get(machine_key, 0) + 1
+            order_failures[machine_key] = failures
+            backoff = _order_backoff(interval, failures)
+            cooldowns[machine_key] = _now() + backoff
             _emit(
                 on_event,
                 {
                     "event": "order_failed",
                     "machine_id": machine.get("machine_id"),
                     "error": str(exc),
+                    "failures": failures,
+                    "backoff": round(backoff, 1),
                 },
             )
             _raise_if_timed_out(deadline, timeout=timeout, reason="without ordering an instance")
-            wait(interval)
             continue
 
         instance_uuid = str(order["instance_uuid"])

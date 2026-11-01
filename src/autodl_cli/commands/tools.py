@@ -258,7 +258,11 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     """
     kind = event.get("event")
     if kind == "poll":
-        output.info(f"Poll #{event.get('attempt', '')}: {event.get('matches', '')} matching machine(s).")
+        line = f"Poll #{event.get('attempt', '')}: {event.get('matches', '')} matching machine(s)"
+        cooling = event.get("cooling")
+        if isinstance(cooling, int) and cooling > 0:
+            line += f", {cooling} cooling down"
+        output.info(f"{line}.")
         return
     if kind == "poll_failed":
         output.warning(
@@ -274,7 +278,13 @@ def _render_snipe_event(event: dict[str, object]) -> None:
         )
         return
     if kind == "order_failed":
-        output.warning(f"Order failed on machine {event.get('machine_id', '')}: {event.get('error', '')}; retrying.")
+        backoff = event.get("backoff")
+        failure_count = event.get("failures")
+        if isinstance(backoff, (int, float)) and isinstance(failure_count, int):
+            detail = f"backing off for {backoff:g}s (failure #{failure_count})"
+        else:
+            detail = "retrying"
+        output.warning(f"Order failed on machine {event.get('machine_id', '')}: {event.get('error', '')}; {detail}.")
         return
     if kind == "ordered":
         machine = event.get("machine")
@@ -393,7 +403,8 @@ def snipe_command(
     command blocks until the ordered instance is running or ``--timeout``
     expires. Transient API errors while polling are retried ``--retry`` times
     consecutively; authentication errors are never retried and ``0`` disables
-    retries.
+    retries. A machine whose order is rejected is skipped for an exponentially
+    growing cooldown, so the next matching machine is tried instead.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param regions: Region identifiers to search; empty means every region.

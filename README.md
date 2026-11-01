@@ -124,7 +124,9 @@ Transient API errors during polling (rate limits or 5xx responses) can be
 retried with `--retry N`: up to N consecutive failures are tolerated per poll
 and the counter resets after a successful check. Authentication errors are
 never retried, and `--retry 0` (the default) disables retries. Order failures
-already retry indefinitely.
+retry indefinitely, but the rejected machine is skipped for a cooldown that
+starts at `--interval` and doubles with each consecutive failure on that machine
+(capped at eight intervals), so the next matching machine is tried instead.
 
 ```bash
 autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --retry 3 --interval 5

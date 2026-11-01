@@ -330,10 +330,18 @@ def _patch_snipe(
                 "gpu_name": result["gpu_name"],
                 "region_name": result["region_name"],
             }
-            on_event({"event": "poll", "attempt": 1, "matches": 3})
+            on_event({"event": "poll", "attempt": 1, "matches": 3, "cooling": 2})
             on_event({"event": "poll_failed", "error": "HTTP 500", "retries": 1, "limit": 3})
             on_event({"event": "found", "machine": machine})
-            on_event({"event": "order_failed", "machine_id": "m-1", "error": "no capacity"})
+            on_event(
+                {
+                    "event": "order_failed",
+                    "machine_id": "m-1",
+                    "error": "no capacity",
+                    "failures": 2,
+                    "backoff": 10.0,
+                }
+            )
             on_event(
                 {
                     "event": "ordered",
@@ -373,10 +381,10 @@ def test_snipe_renders_progress_and_final_success(home: Path, monkeypatch) -> No
     )
 
     assert result.exit_code == 0, result.output
-    assert "Poll #1: 3 matching machine(s)." in result.output
+    assert "Poll #1: 3 matching machine(s), 2 cooling down." in result.output
     assert "Poll failed: HTTP 500; retrying (1/3)." in result.output
     assert "Found RTX 3090 on machine m-1 (西北B区); ordering..." in result.output
-    assert "Order failed on machine m-1: no capacity; retrying." in result.output
+    assert "Order failed on machine m-1: no capacity; backing off for 10s (failure #2)." in result.output
     assert "Ordered instance snipe-instance-1 on machine m-1; waiting for it to start..." in result.output
     assert "Instance status: not visible yet." in result.output
     assert "Instance status: creating." in result.output
