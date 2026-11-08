@@ -18,7 +18,8 @@ import sys
 
 _INSTRUCTIONS = """\
 Wraps the `autodl` CLI (AutoDL container-instance management) as one typed tool
-per leaf command: `autodl_instance_list`, `autodl_account_balance`, and so on.
+per leaf command: `instance_list`, `account_balance`, and so on. MCP clients
+namespace them with the server name, e.g. `mcp__autodl__instance_list`.
 
 Prefer the typed tools. Every typed tool exposes the root `--json` switch as a
 `json` argument — set it to `true` for parseable output instead of styled text.

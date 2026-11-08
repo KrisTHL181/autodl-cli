@@ -251,9 +251,10 @@ autodl tools request /api/v1/user/detail -o out.json
 ### 🤖 MCP Server
 
 Install the optional extra and expose every CLI command as a typed MCP tool —
-`autodl_instance_list`, `autodl_account_balance`, `autodl_gpu_machines`, and so
-on. Each tool inherits the root `json` switch, and `autodl_help` / `autodl_run`
-remain available as escape hatches.
+`instance_list`, `account_balance`, `gpu_machines`, and so on (clients namespace
+them with the server name, e.g. `mcp__autodl__instance_list`). Each tool inherits
+the root `json` switch, and `autodl_help` / `autodl_run` remain available as
+escape hatches.
 
 ```bash
 pip install "autodl-cli[mcp]"
