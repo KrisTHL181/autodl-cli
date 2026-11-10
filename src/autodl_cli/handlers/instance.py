@@ -41,6 +41,10 @@ with the instance UUID and the new base-image UUID, and answers with
 ``"data": null``. It rebuilds the system disk from that image while keeping the
 data disk.
 
+Renaming an instance sends a ``PUT /api/v1/instance/name`` with the instance
+UUID and the new name. It also answers with ``"data": null``, and the new name
+is immediately visible in ``instance list``.
+
 Creating a pay-as-you-go instance posts the web console's order body to
 ``POST /api/v1/order/instance/create/payg``. Its ``data`` field is the new
 instance UUID string rather than an object, so :func:`create_instance` unwraps
@@ -89,6 +93,9 @@ INSTANCE_RESET_PATH = "/api/v1/instance/init"
 
 #: Path of the change-image endpoint.
 INSTANCE_CHANGE_IMAGE_PATH = "/api/v1/instance/change_image"
+
+#: Path of the rename endpoint.
+INSTANCE_RENAME_PATH = "/api/v1/instance/name"
 
 #: Path of the pay-as-you-go instance-create endpoint.
 INSTANCE_CREATE_PATH = "/api/v1/order/instance/create/payg"
@@ -580,6 +587,43 @@ def change_image(client: AutoDLClient, instance_id: str, base_image_uuid: str) -
         "instance_uuid": instance_uuid,
         "base_image_uuid": image_uuid,
         "image_changed": True,
+    }
+
+
+def rename_instance(client: AutoDLClient, instance_id: str, instance_name: str) -> dict[str, object]:
+    """Rename an instance.
+
+    ``PUT /api/v1/instance/name`` answers with ``"data": null`` on success, so
+    success is signalled by the envelope's ``code`` alone. The new name is
+    immediately visible in ``instance list``.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :param instance_name: New instance name; surrounding whitespace is stripped.
+    :returns: A mapping with ``instance_uuid``, ``instance_name``, and
+        ``renamed``.
+    :raises ValueError: When ``instance_id`` or ``instance_name`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    instance_uuid = instance_id.strip()
+    name = instance_name.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+    if not name:
+        raise ValueError("instance_name must not be empty")
+
+    body: dict[str, object] = {
+        "instance_name": name,
+        "instance_uuid": instance_uuid,
+    }
+    payload = client.request("PUT", INSTANCE_RENAME_PATH, json=body)
+    require_success_any(payload, action="rename instance")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "instance_name": name,
+        "renamed": True,
     }
 
 

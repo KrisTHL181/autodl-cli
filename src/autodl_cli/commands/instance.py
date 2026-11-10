@@ -13,7 +13,9 @@ starts the instance in CPU-only mode. ``reset`` posts to
 ``POST /api/v1/instance/init``, rebuilding the system disk while keeping the
 data disk, and asks for confirmation. ``change-image`` posts to
 ``POST /api/v1/instance/change_image`` to rebuild the system disk from another
-base image, and asks for confirmation too. ``release`` posts to
+base image, and asks for confirmation too. ``rename`` sends a
+``PUT /api/v1/instance/name`` to set the instance name and does not prompt for
+confirmation. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
 the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
@@ -143,6 +145,40 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.render_instance_detail(detail, instance_uuid=instance_uuid)
+
+
+@instance.command("rename", help="Rename an instance.")
+@click.argument("instance_uuid")
+@click.argument("new_name")
+@click.pass_context
+def rename_command(ctx: click.Context, instance_uuid: str, new_name: str) -> None:
+    """Rename an instance.
+
+    The new name is set immediately and appears in ``instance list``. The
+    command does not ask for confirmation.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param new_name: New instance name.
+    :raises click.ClickException: When an argument is blank, no token is
+        configured, or the API call fails.
+    """
+    config = load_config()
+    token = require_token(config)
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.rename_instance(client, instance_uuid, new_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Renamed instance {result['instance_uuid']} to {result['instance_name']!r}.")
 
 
 @instance.command("power-on", help="Power an instance on.")

@@ -185,6 +185,7 @@ autodl instance reset <instance-uuid>
 autodl instance reset <instance-uuid> --yes
 autodl instance change-image <instance-uuid> base-image-ec1e9vdbd3
 autodl instance change-image <instance-uuid> base-image-ec1e9vdbd3 --yes
+autodl instance rename <instance-uuid> trainer-2
 autodl instance release <instance-uuid>
 autodl instance release <instance-uuid> --yes
 autodl instance save-image <instance-uuid> my-image
@@ -206,7 +207,8 @@ rebuilds the system disk from the instance's image while keeping the data disk;
 it asks for confirmation unless `--yes` is passed. `change-image` posts to
 `/api/v1/instance/change_image` and rebuilds the system disk from the given
 base image while keeping the data disk; like `reset`, it asks for confirmation
-unless `--yes` is passed. `release` posts to
+unless `--yes` is passed. `rename` sends a PUT to `/api/v1/instance/name` and
+sets the instance name; it does not prompt for confirmation. `release` posts to
 `/api/v1/instance/release` and deletes the instance and its data disk
 immediately; it is irreversible, so the command asks for confirmation unless
 `--yes` is passed. `save-image` posts to

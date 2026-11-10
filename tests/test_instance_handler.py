@@ -687,6 +687,87 @@ def test_change_image_failure_raises_api_error() -> None:
             instance_handler.change_image(client, CHANGE_IMAGE_INSTANCE_UUID, CHANGE_IMAGE_UUID)
 
 
+RENAME_INSTANCE_UUID = "rn4me8k2qp-1b93c7d0"
+RENAME_NAME = "AutoDL-CLI-Rename-Test"
+
+
+def test_rename_instance_puts_expected_body_and_tolerates_null_data() -> None:
+    """The handler trims both inputs, PUTs the console body, and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.rename_instance(
+            client,
+            f" {RENAME_INSTANCE_UUID} ",
+            f" {RENAME_NAME} ",
+        )
+
+    assert seen == {
+        "method": "PUT",
+        "path": "/api/v1/instance/name",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {
+            "instance_name": RENAME_NAME,
+            "instance_uuid": RENAME_INSTANCE_UUID,
+        },
+    }
+    assert result == {
+        "instance_uuid": RENAME_INSTANCE_UUID,
+        "instance_name": RENAME_NAME,
+        "renamed": True,
+    }
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_rename_instance_rejects_blank_instance_id(instance_id: str) -> None:
+    """A blank instance UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_id must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.rename_instance(client, instance_id, RENAME_NAME)
+
+
+@pytest.mark.parametrize("instance_name", ["", "   "])
+def test_rename_instance_rejects_blank_instance_name(instance_name: str) -> None:
+    """A blank instance name fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_name must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.rename_instance(client, RENAME_INSTANCE_UUID, instance_name)
+
+
+def test_rename_instance_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-14"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.rename_instance(client, RENAME_INSTANCE_UUID, RENAME_NAME)
+
+
+def test_rename_instance_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "InstanceNotFound", "msg": "no such instance", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no such instance"):
+            instance_handler.rename_instance(client, RENAME_INSTANCE_UUID, RENAME_NAME)
+
+
 POWER_ON_INSTANCE_UUID = "on7kf92mzu-4a18b0c3"
 
 

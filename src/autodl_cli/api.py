@@ -36,6 +36,7 @@ __all__ = [
     "power_off",
     "power_on",
     "release_instance",
+    "rename_instance",
     "reset_instance",
     "save_image",
 ]
@@ -349,6 +350,24 @@ def change_image(token: str, instance_uuid: str, base_image_uuid: str) -> dict[s
     """
     with AutoDLClient(token) as client:
         return instance_handler.change_image(client, instance_uuid, base_image_uuid)
+
+
+def rename_instance(token: str, instance_uuid: str, instance_name: str) -> dict[str, object]:
+    """Rename an instance.
+
+    AutoDL answers with a null ``data`` payload. The new name is immediately
+    visible in :func:`list_instances`.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :param instance_name: New instance name.
+    :returns: A mapping with ``instance_uuid``, ``instance_name``, and
+        ``renamed``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.rename_instance(client, instance_uuid, instance_name)
 
 
 def save_image(

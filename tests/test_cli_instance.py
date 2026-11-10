@@ -77,6 +77,7 @@ INSTANCES = [
 
 INSTANCE_UUID = "9b384da211-e57974ef"
 IMAGE_UUID = "base-image-ec1e9vdbd3"
+RENAME_NAME = "AutoDL-CLI-Rename-Test"
 
 DETAIL = {
     "image_type": "",
@@ -931,6 +932,98 @@ def test_change_image_api_failure_is_a_clean_click_exception(home: Path, monkeyp
     monkeypatch.setattr(instance_commands.instance_handler, "change_image", failing_change_image)
 
     result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID, "--yes"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_rename_forwards_arguments_and_returns_json(home: Path, monkeypatch) -> None:
+    """The positionals reach the handler and JSON is passed through, without a prompt."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {
+        "instance_uuid": INSTANCE_UUID,
+        "instance_name": RENAME_NAME,
+        "renamed": True,
+    }
+
+    def fake_rename_instance(client, instance_id, instance_name):
+        captured["instance_id"] = instance_id
+        captured["instance_name"] = instance_name
+        return record
+
+    monkeypatch.setattr(instance_commands.instance_handler, "rename_instance", fake_rename_instance)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "rename", INSTANCE_UUID, RENAME_NAME])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID, "instance_name": RENAME_NAME}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_rename_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms the instance's new name."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "rename_instance",
+        lambda client, instance_id, instance_name: {
+            "instance_uuid": instance_id,
+            "instance_name": instance_name,
+            "renamed": True,
+        },
+    )
+
+    result = CliRunner().invoke(main, ["instance", "rename", INSTANCE_UUID, RENAME_NAME])
+
+    assert result.exit_code == 0, result.output
+    assert f"Renamed instance {INSTANCE_UUID} to {RENAME_NAME!r}." in result.output
+    assert TOKEN not in result.output
+
+
+def test_rename_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> None:
+    """A blank name rejected by the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_rename_instance(client, instance_id, instance_name):
+        raise ValueError("instance_name must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "rename_instance", failing_rename_instance)
+
+    result = CliRunner().invoke(main, ["instance", "rename", INSTANCE_UUID, " "])
+
+    assert result.exit_code == 1
+    assert "instance_name must not be empty" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_rename_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "rename_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "rename", INSTANCE_UUID, RENAME_NAME])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_rename_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_rename_instance(client, instance_id, instance_name):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "rename_instance", failing_rename_instance)
+
+    result = CliRunner().invoke(main, ["instance", "rename", INSTANCE_UUID, RENAME_NAME])
 
     assert result.exit_code == 1
     assert "token expired" in result.output
