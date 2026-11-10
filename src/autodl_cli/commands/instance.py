@@ -5,7 +5,10 @@ filter is applied locally because the API has no keyword field. ``detail``
 reads one instance's configuration snapshot from
 ``GET /api/v1/instance/snapshot``. ``create`` posts the web console's
 pay-as-you-go order body to ``POST /api/v1/order/instance/create/payg`` and
-can resolve a machine from ``--region``/``--gpu`` first. ``power-on`` and
+can resolve a machine from ``--region``/``--gpu`` first. ``clone`` inherits the
+source instance's image and GPU count and posts
+``POST /api/v1/order/instance/clone/payg``, resolving the target machine the
+same way. ``power-on`` and
 ``power-off`` post to
 ``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
 which report success with a null ``data`` payload; ``power-on --non-gpu``
@@ -536,6 +539,130 @@ def create_command(
         return
 
     output.success(f"Instance {result['instance_uuid']} ordered on machine {result['machine_id']}.")
+    output.info("Check its status with `autodl instance list`.")
+
+
+@instance.command("clone", help="Clone an instance onto a machine.")
+@click.argument("instance_uuid")
+@click.option(
+    "--machine-id",
+    "-m",
+    default="",
+    help="Clone onto this machine ID (from `autodl gpu machines`).",
+)
+@click.option(
+    "--region",
+    "-r",
+    default="",
+    help="Resolve a machine in this region (needs --gpu).",
+)
+@click.option(
+    "--gpu",
+    "-g",
+    default="",
+    help="GPU model to require when resolving a machine (needs --region).",
+)
+@click.option(
+    "--gpu-num",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Number of GPUs to request; defaults to the source instance's amount.",
+)
+@click.option("--name", "-n", default="", help="Name for the clone.")
+@click.option(
+    "--data-disk",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Extra data-disk size in GB.",
+)
+@click.option(
+    "--copy-data-disk/--no-copy-data-disk",
+    default=True,
+    help="Copy the source instance's data disk.",
+)
+@click.option(
+    "--keep-service-address",
+    is_flag=True,
+    help="Keep the source instance's user service address.",
+)
+@click.pass_context
+def clone_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    machine_id: str,
+    region: str,
+    gpu: str,
+    gpu_num: int | None,
+    name: str,
+    data_disk: int,
+    copy_data_disk: bool,
+    keep_service_address: bool,
+) -> None:
+    """Clone an instance onto a machine.
+
+    Pass either ``--machine-id`` or both ``--region`` and ``--gpu``. In the
+    latter case the first machine in that region with enough idle GPUs of the
+    requested model is used. The image is inherited from the source instance.
+    ``--gpu-num`` defaults to the source instance's GPU count. The command does
+    not ask for confirmation: AutoDL returns the new instance UUID immediately,
+    and the clone may take a moment to appear in ``instance list``.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Source instance UUID as printed by ``instance list``.
+    :param machine_id: Machine to clone onto; blank means resolve one.
+    :param region: Region identifier used to resolve a machine.
+    :param gpu: GPU model used to resolve a machine.
+    :param gpu_num: Number of GPUs to request; ``None`` inherits the source's.
+    :param name: Optional name for the clone.
+    :param data_disk: Extra data-disk size in GB.
+    :param copy_data_disk: Whether to copy the source instance's data disk.
+    :param keep_service_address: Whether to keep the source's user service
+        address.
+    :raises click.ClickException: When the selection options are inconsistent,
+        an argument is invalid, no token is configured, or the API call fails.
+    """
+    if machine_id.strip() and (region.strip() or gpu.strip()):
+        raise click.ClickException("Use either --machine-id or --region/--gpu, not both.")
+    if not machine_id.strip() and not (region.strip() and gpu.strip()):
+        raise click.ClickException("Pass --machine-id, or both --region and --gpu.")
+
+    config = load_config()
+    token = require_token(config)
+
+    try:
+        with build_client(token, config) as client:
+            source = instance_handler.resolve_clone_source(client, instance_uuid)
+            gpu_amount = source["gpu_amount"] if gpu_num is None else gpu_num
+            resolved_machine_id = machine_id.strip()
+            if not resolved_machine_id:
+                machine = instance_handler.select_machine(client, region=region, gpu=gpu, gpu_amount=gpu_amount)
+                resolved_machine_id = str(machine["machine_id"])
+            result = instance_handler.clone_instance(
+                client,
+                str(source["instance_uuid"]),
+                machine_id=resolved_machine_id,
+                base_image_uuid=str(source["base_image_uuid"]),
+                private_image_uuid=str(source["private_image_uuid"]),
+                gpu_amount=gpu_amount,
+                instance_name=name,
+                expand_data_disk=data_disk,
+                copy_data_disk=copy_data_disk,
+                keep_src_user_service_address=keep_service_address,
+            )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(
+        f"Instance {result['instance_uuid']} cloned from {result['source_instance_uuid']} "
+        f"on machine {result['machine_id']}."
+    )
     output.info("Check its status with `autodl instance list`.")
 
 

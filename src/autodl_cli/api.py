@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AutoDLClient",
     "change_image",
+    "clone_instance",
     "create_instance",
     "delete_private_image",
     "get_balance",
@@ -262,6 +263,65 @@ def create_instance(
             gpu_amount=gpu_amount,
             instance_name=instance_name,
             expand_data_disk=expand_data_disk,
+        )
+
+
+def clone_instance(
+    token: str,
+    instance_uuid: str,
+    *,
+    machine_id: str,
+    gpu_amount: int | None = None,
+    instance_name: str = "",
+    expand_data_disk: int = 0,
+    copy_data_disk: bool = True,
+    keep_src_user_service_address: bool = False,
+) -> dict[str, object]:
+    """Clone an instance onto a machine as a new pay-as-you-go order.
+
+    The image and, unless ``gpu_amount`` is given, the GPU count are inherited
+    from the source instance. AutoDL accepts the order immediately and returns
+    the new instance UUID; the clone may take a moment to appear in
+    :func:`list_instances`. This wrapper clones onto a known machine only;
+    resolving a region and GPU model to a machine is a CLI concern and is not
+    part of the public API.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Source instance UUID as returned by
+        :func:`list_instances`.
+    :param machine_id: Machine to clone onto, as reported by the machine
+        listing.
+    :param gpu_amount: Number of GPUs to request; ``None`` inherits the source
+        instance's amount. Must be at least 1 when given.
+    :param instance_name: Optional name for the clone.
+    :param expand_data_disk: Extra data-disk size in GB; must not be negative.
+    :param copy_data_disk: Whether to copy the source instance's data disk.
+    :param keep_src_user_service_address: Whether to keep the source instance's
+        user service address.
+    :returns: A mapping with ``instance_uuid`` (the new clone),
+        ``source_instance_uuid``, ``machine_id``, ``gpu_amount``,
+        ``charge_type``, ``base_image_uuid``, ``private_image_uuid``,
+        ``instance_name``, ``expand_data_disk``, ``copy_data_disk``, and
+        ``keep_src_user_service_address``.
+    :raises ValueError: When ``instance_uuid`` or ``machine_id`` is blank,
+        ``gpu_amount`` is below 1, or ``expand_data_disk`` is negative.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        source = instance_handler.resolve_clone_source(client, instance_uuid)
+        amount = source["gpu_amount"] if gpu_amount is None else gpu_amount
+        return instance_handler.clone_instance(
+            client,
+            str(source["instance_uuid"]),
+            machine_id=machine_id,
+            base_image_uuid=str(source["base_image_uuid"]),
+            private_image_uuid=str(source["private_image_uuid"]),
+            gpu_amount=amount,
+            instance_name=instance_name,
+            expand_data_disk=expand_data_disk,
+            copy_data_disk=copy_data_disk,
+            keep_src_user_service_address=keep_src_user_service_address,
         )
 
 

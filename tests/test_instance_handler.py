@@ -1098,6 +1098,417 @@ def test_create_instance_rejects_invalid_arguments(kwargs: dict[str, object], me
             instance_handler.create_instance(client, **kwargs)
 
 
+CLONE_SOURCE_UUID = "71f24fb92a-e99de0d2"
+CLONE_MACHINE_ID = "eb534b8ca9"
+CLONE_BASE_IMAGE_UUID = "base-image-ee43618uo7"
+CLONE_PRIVATE_IMAGE_UUID = "image-abcd1234"
+CLONE_NEW_UUID = "eb534b8ca9-0a1b2c3d"
+
+CLONE_BODY = {
+    "instance_uuid": CLONE_SOURCE_UUID,
+    "instance_info": {
+        "machine_id": CLONE_MACHINE_ID,
+        "charge_type": "payg",
+        "req_gpu_amount": 1,
+        "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+        "instance_name": "",
+        "private_image_uuid": "",
+        "reproduction_uuid": "",
+        "cg_application_uuid": "",
+        "cg_application_info": {},
+        "expand_data_disk": 0,
+        "copy_data_disk_after_clone": True,
+        "keep_src_user_service_address_after_clone": False,
+        "reproduction_id": 0,
+        "ft_sparse": True,
+    },
+    "price_info": {
+        "coupon_id_list": [],
+        "machine_id": CLONE_MACHINE_ID,
+        "charge_type": "payg",
+        "duration": 1,
+        "num": 1,
+        "expand_data_disk": 0,
+    },
+}
+
+
+def test_clone_instance_posts_console_body_and_unwraps_uuid() -> None:
+    """The handler trims inputs, POSTs the captured body, and returns a flat record."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(CLONE_NEW_UUID)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.clone_instance(
+            client,
+            f" {CLONE_SOURCE_UUID} ",
+            machine_id=f" {CLONE_MACHINE_ID} ",
+            base_image_uuid=CLONE_BASE_IMAGE_UUID,
+        )
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/order/instance/clone/payg",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": CLONE_BODY,
+    }
+    assert result == {
+        "instance_uuid": CLONE_NEW_UUID,
+        "source_instance_uuid": CLONE_SOURCE_UUID,
+        "machine_id": CLONE_MACHINE_ID,
+        "gpu_amount": 1,
+        "charge_type": "payg",
+        "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "instance_name": "",
+        "expand_data_disk": 0,
+        "copy_data_disk": True,
+        "keep_src_user_service_address": False,
+    }
+
+
+def test_clone_instance_forwards_copy_and_keep_flags() -> None:
+    """The copy/keep switches, GPU count, name, and disk size reach the body."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(CLONE_NEW_UUID)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.clone_instance(
+            client,
+            CLONE_SOURCE_UUID,
+            machine_id=CLONE_MACHINE_ID,
+            base_image_uuid=CLONE_BASE_IMAGE_UUID,
+            gpu_amount=2,
+            instance_name=" copy ",
+            expand_data_disk=30,
+            copy_data_disk=False,
+            keep_src_user_service_address=True,
+        )
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["instance_info"]["req_gpu_amount"] == 2
+    assert body["instance_info"]["instance_name"] == "copy"
+    assert body["instance_info"]["expand_data_disk"] == 30
+    assert body["instance_info"]["copy_data_disk_after_clone"] is False
+    assert body["instance_info"]["keep_src_user_service_address_after_clone"] is True
+    assert body["price_info"]["expand_data_disk"] == 30
+    assert result == {
+        "instance_uuid": CLONE_NEW_UUID,
+        "source_instance_uuid": CLONE_SOURCE_UUID,
+        "machine_id": CLONE_MACHINE_ID,
+        "gpu_amount": 2,
+        "charge_type": "payg",
+        "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "instance_name": "copy",
+        "expand_data_disk": 30,
+        "copy_data_disk": False,
+        "keep_src_user_service_address": True,
+    }
+
+
+def test_clone_instance_private_image_variant() -> None:
+    """A private-image clone sends that UUID and leaves the base image blank."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(CLONE_NEW_UUID)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.clone_instance(
+            client,
+            CLONE_SOURCE_UUID,
+            machine_id=CLONE_MACHINE_ID,
+            private_image_uuid=CLONE_PRIVATE_IMAGE_UUID,
+        )
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["instance_info"]["base_image_uuid"] == ""
+    assert body["instance_info"]["private_image_uuid"] == CLONE_PRIVATE_IMAGE_UUID
+    assert result["base_image_uuid"] == ""
+    assert result["private_image_uuid"] == CLONE_PRIVATE_IMAGE_UUID
+
+
+@pytest.mark.parametrize("data", [None, 123, {"uuid": CLONE_NEW_UUID}, ["x"], "", "   "])
+def test_clone_instance_malformed_uuid_raises_api_error(data: object) -> None:
+    """A successful envelope whose ``data`` is not a non-empty string is malformed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(data)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="malformed data"):
+            instance_handler.clone_instance(
+                client,
+                CLONE_SOURCE_UUID,
+                machine_id=CLONE_MACHINE_ID,
+                base_image_uuid=CLONE_BASE_IMAGE_UUID,
+            )
+
+
+def test_clone_instance_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "MachineNotEnoughGpu", "msg": "no capacity", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no capacity"):
+            instance_handler.clone_instance(
+                client,
+                CLONE_SOURCE_UUID,
+                machine_id=CLONE_MACHINE_ID,
+                base_image_uuid=CLONE_BASE_IMAGE_UUID,
+            )
+
+
+def test_clone_instance_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-15"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.clone_instance(
+                client,
+                CLONE_SOURCE_UUID,
+                machine_id=CLONE_MACHINE_ID,
+                base_image_uuid=CLONE_BASE_IMAGE_UUID,
+            )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"instance_uuid": "", "machine_id": CLONE_MACHINE_ID, "base_image_uuid": CLONE_BASE_IMAGE_UUID},
+            "instance_uuid must not be empty",
+        ),
+        (
+            {"instance_uuid": "   ", "machine_id": CLONE_MACHINE_ID, "base_image_uuid": CLONE_BASE_IMAGE_UUID},
+            "instance_uuid must not be empty",
+        ),
+        (
+            {"instance_uuid": CLONE_SOURCE_UUID, "machine_id": "", "base_image_uuid": CLONE_BASE_IMAGE_UUID},
+            "machine_id must not be empty",
+        ),
+        (
+            {"instance_uuid": CLONE_SOURCE_UUID, "machine_id": "   ", "base_image_uuid": CLONE_BASE_IMAGE_UUID},
+            "machine_id must not be empty",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "gpu_amount": 0,
+            },
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "gpu_amount": -2,
+            },
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "gpu_amount": True,
+            },
+            "gpu_amount must be at least 1",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "expand_data_disk": -1,
+            },
+            "expand_data_disk must not be negative",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "expand_data_disk": True,
+            },
+            "expand_data_disk must not be negative",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+                "private_image_uuid": CLONE_PRIVATE_IMAGE_UUID,
+            },
+            "exactly one of base_image_uuid and private_image_uuid must be set",
+        ),
+        (
+            {
+                "instance_uuid": CLONE_SOURCE_UUID,
+                "machine_id": CLONE_MACHINE_ID,
+                "base_image_uuid": "  ",
+                "private_image_uuid": "  ",
+            },
+            "exactly one of base_image_uuid and private_image_uuid must be set",
+        ),
+    ],
+)
+def test_clone_instance_rejects_invalid_arguments(kwargs: dict[str, object], message: str) -> None:
+    """Invalid clone parameters fail before any request is sent."""
+    with pytest.raises(ValueError, match=message):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.clone_instance(client, **kwargs)
+
+
+def test_resolve_clone_source_public_image_reads_gpu_amount_from_list() -> None:
+    """A public snapshot yields the base image and the list's GPU count."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success(SNAPSHOT)
+        seen.append(request.url.path)
+        return _success(_page([{"uuid": CLONE_SOURCE_UUID, "req_gpu_amount": 3}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.resolve_clone_source(client, f" {CLONE_SOURCE_UUID} ")
+
+    assert result == {
+        "instance_uuid": CLONE_SOURCE_UUID,
+        "base_image_uuid": CLONE_BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "gpu_amount": 3,
+    }
+    assert seen == ["/api/v1/instance"]
+
+
+def test_resolve_clone_source_private_image_type_uses_private_uuid() -> None:
+    """An explicit ``private`` image type fills ``private_image_uuid``."""
+    snapshot = {
+        **SNAPSHOT,
+        "image": {
+            **SNAPSHOT["image"],
+            "image_type": "private",
+            "base_image_uuid": CLONE_PRIVATE_IMAGE_UUID,
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success(snapshot)
+        return _success(_page([{"uuid": CLONE_SOURCE_UUID, "req_gpu_amount": 1}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.resolve_clone_source(client, CLONE_SOURCE_UUID)
+
+    assert result["base_image_uuid"] == ""
+    assert result["private_image_uuid"] == CLONE_PRIVATE_IMAGE_UUID
+
+
+def test_resolve_clone_source_image_prefix_heuristic_uses_private_uuid() -> None:
+    """An unknown image type with the ``image-`` prefix is treated as private."""
+    snapshot = {
+        **SNAPSHOT,
+        "image": {
+            **SNAPSHOT["image"],
+            "image_type": "",
+            "base_image_uuid": CLONE_PRIVATE_IMAGE_UUID,
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success(snapshot)
+        return _success(_page([{"uuid": CLONE_SOURCE_UUID, "req_gpu_amount": 1}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.resolve_clone_source(client, CLONE_SOURCE_UUID)
+
+    assert result["base_image_uuid"] == ""
+    assert result["private_image_uuid"] == CLONE_PRIVATE_IMAGE_UUID
+
+
+def test_resolve_clone_source_missing_from_list_raises_api_error() -> None:
+    """A source absent from the instance list cannot be cloned."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success(SNAPSHOT)
+        return _success(_page([{"uuid": "different-uuid", "req_gpu_amount": 1}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="not found in the instance list"):
+            instance_handler.resolve_clone_source(client, CLONE_SOURCE_UUID)
+
+
+@pytest.mark.parametrize(
+    "gpu_amount",
+    [None, 0, -1, True, "2"],
+)
+def test_resolve_clone_source_malformed_gpu_amount_raises_api_error(gpu_amount: object) -> None:
+    """A missing or non-positive GPU count cannot be inherited."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success(SNAPSHOT)
+        return _success(_page([{"uuid": CLONE_SOURCE_UUID, "req_gpu_amount": gpu_amount}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="could not determine the GPU amount"):
+            instance_handler.resolve_clone_source(client, CLONE_SOURCE_UUID)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [None, "not-an-object", [], {}, {"base_image_uuid": ""}, {"base_image_uuid": 123}],
+)
+def test_resolve_clone_source_malformed_image_raises_api_error(image: object) -> None:
+    """A snapshot without a usable image mapping is malformed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _success({**SNAPSHOT, "image": image})
+        pytest.fail("the instance list must not be queried for a malformed image")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="malformed image data"):
+            instance_handler.resolve_clone_source(client, CLONE_SOURCE_UUID)
+
+
+@pytest.mark.parametrize("instance_uuid", ["", "   "])
+def test_resolve_clone_source_rejects_blank_instance_uuid(instance_uuid: str) -> None:
+    """A blank source UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_uuid must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.resolve_clone_source(client, instance_uuid)
+
+
 REGION_LIST = [
     {
         "data_center": "westDC3",

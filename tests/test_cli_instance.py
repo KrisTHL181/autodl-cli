@@ -1489,3 +1489,301 @@ def test_create_value_error_is_a_clean_click_exception(home: Path, monkeypatch) 
     assert result.exit_code == 1
     assert "exactly one of base_image_uuid and private_image_uuid must be set" in result.output
     assert "Traceback" not in result.output
+
+
+CLONE_SOURCE_UUID = "71f24fb92a-e99de0d2"
+CLONE_SOURCE_BASE_IMAGE_UUID = "base-image-ee43618uo7"
+CLONE_SOURCE_GPU_AMOUNT = 3
+CLONE_MACHINE_ID = "eb534b8ca9"
+CLONE_NEW_UUID = "eb534b8ca9-0a1b2c3d"
+
+CLONE_SOURCE = {
+    "instance_uuid": CLONE_SOURCE_UUID,
+    "base_image_uuid": CLONE_SOURCE_BASE_IMAGE_UUID,
+    "private_image_uuid": "",
+    "gpu_amount": CLONE_SOURCE_GPU_AMOUNT,
+}
+
+CLONE_RECORD = {
+    "instance_uuid": CLONE_NEW_UUID,
+    "source_instance_uuid": CLONE_SOURCE_UUID,
+    "machine_id": CLONE_MACHINE_ID,
+    "gpu_amount": CLONE_SOURCE_GPU_AMOUNT,
+    "charge_type": "payg",
+    "base_image_uuid": CLONE_SOURCE_BASE_IMAGE_UUID,
+    "private_image_uuid": "",
+    "instance_name": "trainer",
+    "expand_data_disk": 50,
+    "copy_data_disk": True,
+    "keep_src_user_service_address": False,
+}
+
+
+def test_clone_forwards_explicit_machine_and_source_values(home: Path, monkeypatch) -> None:
+    """The explicit machine and derived source values reach ``clone_instance``."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_resolve_clone_source(client, instance_uuid):
+        captured["source_uuid"] = instance_uuid
+        return CLONE_SOURCE
+
+    def fake_clone_instance(client, instance_uuid, **kwargs):
+        captured["instance_uuid"] = instance_uuid
+        captured.update(kwargs)
+        return CLONE_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "resolve_clone_source", fake_resolve_clone_source)
+    monkeypatch.setattr(instance_commands.instance_handler, "clone_instance", fake_clone_instance)
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "select_machine",
+        lambda *args, **kwargs: pytest.fail("no machine resolution is needed with --machine-id"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "clone",
+            CLONE_SOURCE_UUID,
+            "--machine-id",
+            f" {CLONE_MACHINE_ID} ",
+            "--name",
+            "trainer",
+            "--data-disk",
+            "50",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "source_uuid": CLONE_SOURCE_UUID,
+        "instance_uuid": CLONE_SOURCE_UUID,
+        "machine_id": CLONE_MACHINE_ID,
+        "base_image_uuid": CLONE_SOURCE_BASE_IMAGE_UUID,
+        "private_image_uuid": "",
+        "gpu_amount": CLONE_SOURCE_GPU_AMOUNT,
+        "instance_name": "trainer",
+        "expand_data_disk": 50,
+        "copy_data_disk": True,
+        "keep_src_user_service_address": False,
+    }
+    assert json.loads(result.output) == CLONE_RECORD
+    assert TOKEN not in result.output
+
+
+def test_clone_gpu_num_overrides_derived_amount(home: Path, monkeypatch) -> None:
+    """``--gpu-num`` replaces the GPU count inherited from the source."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda client, instance_uuid: CLONE_SOURCE,
+    )
+
+    def fake_clone_instance(client, instance_uuid, **kwargs):
+        captured.update(kwargs)
+        return CLONE_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "clone_instance", fake_clone_instance)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "clone",
+            CLONE_SOURCE_UUID,
+            "--machine-id",
+            CLONE_MACHINE_ID,
+            "--gpu-num",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["gpu_amount"] == 2
+
+
+def test_clone_resolves_region_and_gpu_with_derived_amount(home: Path, monkeypatch) -> None:
+    """``--region``/``--gpu`` call ``select_machine`` with the source GPU count."""
+    _seed_token()
+    selected: dict[str, object] = {}
+    captured: dict[str, object] = {}
+
+    def fake_select_machine(client, *, region, gpu, gpu_amount):
+        selected.update(region=region, gpu=gpu, gpu_amount=gpu_amount)
+        return {"machine_id": CLONE_MACHINE_ID, "gpu_name": gpu, "gpu_idle_num": 8}
+
+    def fake_clone_instance(client, instance_uuid, **kwargs):
+        captured.update(kwargs)
+        return CLONE_RECORD
+
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda client, instance_uuid: CLONE_SOURCE,
+    )
+    monkeypatch.setattr(instance_commands.instance_handler, "select_machine", fake_select_machine)
+    monkeypatch.setattr(instance_commands.instance_handler, "clone_instance", fake_clone_instance)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "clone",
+            CLONE_SOURCE_UUID,
+            "--region",
+            "nm-B2",
+            "--gpu",
+            "RTX 3090",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert selected == {"region": "nm-B2", "gpu": "RTX 3090", "gpu_amount": CLONE_SOURCE_GPU_AMOUNT}
+    assert captured["machine_id"] == CLONE_MACHINE_ID
+    assert captured["gpu_amount"] == CLONE_SOURCE_GPU_AMOUNT
+
+
+def test_clone_human_output_reports_clone(home: Path, monkeypatch) -> None:
+    """The human view names the clone, its source, and the target machine."""
+    _seed_token()
+    monkeypatch.setattr(output_module, "console", Console(width=160))
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda client, instance_uuid: CLONE_SOURCE,
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "clone_instance",
+        lambda client, instance_uuid, **kwargs: CLONE_RECORD,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "clone", CLONE_SOURCE_UUID, "--machine-id", CLONE_MACHINE_ID],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"Instance {CLONE_NEW_UUID} cloned from {CLONE_SOURCE_UUID} on machine {CLONE_MACHINE_ID}." in result.output
+    assert "Check its status with `autodl instance list`." in result.output
+    assert TOKEN not in result.output
+
+
+def test_clone_rejects_machine_id_with_region_or_gpu(home: Path, monkeypatch) -> None:
+    """Mixing the two selection modes is a clean usage error."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda *args, **kwargs: pytest.fail("the handler must not run for mixed selection options"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "instance",
+            "clone",
+            CLONE_SOURCE_UUID,
+            "--machine-id",
+            CLONE_MACHINE_ID,
+            "--region",
+            "nm-B2",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Use either --machine-id or --region/--gpu, not both." in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        [],
+        ["--region", "nm-B2"],
+        ["--gpu", "RTX 3090"],
+    ],
+)
+def test_clone_requires_a_complete_selection(home: Path, monkeypatch, selection: list[str]) -> None:
+    """Without a machine ID, both ``--region`` and ``--gpu`` are required."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a complete selection"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "clone", CLONE_SOURCE_UUID, *selection])
+
+    assert result.exit_code == 1
+    assert "Pass --machine-id, or both --region and --gpu." in result.output
+    assert "Traceback" not in result.output
+
+
+def test_clone_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "clone", CLONE_SOURCE_UUID, "--machine-id", CLONE_MACHINE_ID],
+    )
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_clone_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_resolve_clone_source(client, instance_uuid):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "resolve_clone_source", failing_resolve_clone_source)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "clone", CLONE_SOURCE_UUID, "--machine-id", CLONE_MACHINE_ID],
+    )
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_clone_value_error_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """A validation error from the handler exits 1 without a traceback."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda client, instance_uuid: CLONE_SOURCE,
+    )
+
+    def failing_clone_instance(client, instance_uuid, **kwargs):
+        raise ValueError("instance_uuid must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "clone_instance", failing_clone_instance)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "clone", CLONE_SOURCE_UUID, "--machine-id", CLONE_MACHINE_ID],
+    )
+
+    assert result.exit_code == 1
+    assert "instance_uuid must not be empty" in result.output
+    assert "Traceback" not in result.output

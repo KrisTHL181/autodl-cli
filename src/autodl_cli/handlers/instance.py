@@ -51,6 +51,12 @@ instance UUID string rather than an object, so :func:`create_instance` unwraps
 it with :func:`require_success_any` and returns a flat order record.
 :func:`select_machine` resolves a region and GPU model to the first orderable
 machine with enough idle cards.
+
+Cloning an instance posts the web console's order body to
+``POST /api/v1/order/instance/clone/payg``. The image and GPU count are
+inherited from the source instance: :func:`resolve_clone_source` reads the
+snapshot for the image and the instance list for ``req_gpu_amount``. Like
+create, the response's ``data`` is the new instance UUID string.
 """
 
 from __future__ import annotations
@@ -99,6 +105,9 @@ INSTANCE_RENAME_PATH = "/api/v1/instance/name"
 
 #: Path of the pay-as-you-go instance-create endpoint.
 INSTANCE_CREATE_PATH = "/api/v1/order/instance/create/payg"
+
+#: Path of the pay-as-you-go instance-clone endpoint.
+INSTANCE_CLONE_PATH = "/api/v1/order/instance/clone/payg"
 
 #: Billing mode used by the instance-create endpoint.
 CREATE_CHARGE_TYPE = "payg"
@@ -392,6 +401,178 @@ def create_instance(
         "private_image_uuid": private_image,
         "instance_name": name,
         "expand_data_disk": expand_data_disk,
+    }
+
+
+def resolve_clone_source(client: AutoDLClient, instance_uuid: str) -> dict[str, object]:
+    """Resolve the image and GPU count to carry over when cloning.
+
+    The snapshot names the source instance's image, but not how many GPUs it
+    uses. That count lives in the instance list, so the source is looked up
+    there by exact UUID. The list endpoint's ``query`` is a substring match, so
+    a result is accepted only when its ``uuid`` equals ``instance_uuid``.
+
+    An image is treated as private when the snapshot says so, or when its type
+    is unknown but its UUID uses the ``image-`` private-image prefix. Every
+    other image is treated as a base image.
+
+    :param client: Authenticated API client.
+    :param instance_uuid: Source instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``,
+        ``private_image_uuid``, and ``gpu_amount``.
+    :raises ValueError: When ``instance_uuid`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the snapshot or instance list is
+        malformed, the GPU amount cannot be determined, or the source is not in
+        the instance list.
+    """
+    source_uuid = instance_uuid.strip()
+    if not source_uuid:
+        raise ValueError("instance_uuid must not be empty")
+
+    snapshot = get_instance(client, source_uuid)
+    image = snapshot.get("image")
+    if not isinstance(image, dict):
+        raise APIError("AutoDL instance snapshot returned malformed image data")
+    image_uuid = image.get("base_image_uuid")
+    if not isinstance(image_uuid, str) or not image_uuid.strip():
+        raise APIError("AutoDL instance snapshot returned malformed image data")
+    image_uuid = image_uuid.strip()
+
+    image_type = image.get("image_type")
+    is_private = image_type == "private" or (image_type != "public" and image_uuid.startswith("image-"))
+    base_image = "" if is_private else image_uuid
+    private_image = image_uuid if is_private else ""
+
+    for instance in list_instances(client, query=source_uuid):
+        if instance.get("uuid") != source_uuid:
+            continue
+        gpu_amount = instance.get("req_gpu_amount")
+        if isinstance(gpu_amount, bool) or not isinstance(gpu_amount, int) or gpu_amount < 1:
+            raise APIError(f"AutoDL could not determine the GPU amount of instance {source_uuid!r}")
+        return {
+            "instance_uuid": source_uuid,
+            "base_image_uuid": base_image,
+            "private_image_uuid": private_image,
+            "gpu_amount": gpu_amount,
+        }
+
+    raise APIError(f"AutoDL instance {source_uuid!r} was not found in the instance list")
+
+
+def clone_instance(
+    client: AutoDLClient,
+    instance_uuid: str,
+    *,
+    machine_id: str,
+    base_image_uuid: str = "",
+    private_image_uuid: str = "",
+    gpu_amount: int = 1,
+    instance_name: str = "",
+    expand_data_disk: int = 0,
+    copy_data_disk: bool = True,
+    keep_src_user_service_address: bool = False,
+) -> dict[str, object]:
+    """Clone an instance onto a machine as a new pay-as-you-go order.
+
+    ``POST /api/v1/order/instance/clone/payg`` answers with the new instance
+    UUID as a bare string under ``data``, not as an object. Success is therefore
+    checked with :func:`require_success_any` and the string is validated before
+    it is returned.
+
+    Exactly one of ``base_image_uuid`` and ``private_image_uuid`` must be set.
+    Call :func:`resolve_clone_source` first to derive both values, plus the
+    source instance's GPU count, from the source instance. The request is
+    accepted immediately; the clone may take a moment to appear in
+    ``instance list``.
+
+    :param client: Authenticated API client.
+    :param instance_uuid: Source instance UUID from :func:`list_instances`.
+    :param machine_id: Machine to clone onto, from ``gpu machines``.
+    :param base_image_uuid: Base-image UUID inherited from the source instance.
+    :param private_image_uuid: Private-image UUID inherited from the source
+        instance.
+    :param gpu_amount: Number of GPUs to request; must be at least 1.
+    :param instance_name: Optional name for the clone; surrounding whitespace is
+        stripped.
+    :param expand_data_disk: Extra data-disk size in GB; must not be negative.
+    :param copy_data_disk: Whether to copy the source's data disk.
+    :param keep_src_user_service_address: Whether to keep the source's user
+        service address.
+    :returns: A mapping with ``instance_uuid`` (the new clone),
+        ``source_instance_uuid``, ``machine_id``, ``gpu_amount``,
+        ``charge_type``, ``base_image_uuid``, ``private_image_uuid``,
+        ``instance_name``, ``expand_data_disk``, ``copy_data_disk``, and
+        ``keep_src_user_service_address``.
+    :raises ValueError: When ``instance_uuid`` or ``machine_id`` is blank,
+        ``gpu_amount`` is below 1, ``expand_data_disk`` is negative, or not
+        exactly one image UUID is set.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
+    """
+    source_uuid = instance_uuid.strip()
+    if not source_uuid:
+        raise ValueError("instance_uuid must not be empty")
+    machine = machine_id.strip()
+    if not machine:
+        raise ValueError("machine_id must not be empty")
+    if isinstance(gpu_amount, bool) or gpu_amount < 1:
+        raise ValueError("gpu_amount must be at least 1")
+    if isinstance(expand_data_disk, bool) or expand_data_disk < 0:
+        raise ValueError("expand_data_disk must not be negative")
+
+    base_image = base_image_uuid.strip()
+    private_image = private_image_uuid.strip()
+    if bool(base_image) == bool(private_image):
+        raise ValueError("exactly one of base_image_uuid and private_image_uuid must be set")
+    name = instance_name.strip()
+
+    body: dict[str, object] = {
+        "instance_uuid": source_uuid,
+        "instance_info": {
+            "machine_id": machine,
+            "charge_type": CREATE_CHARGE_TYPE,
+            "req_gpu_amount": gpu_amount,
+            "base_image_uuid": base_image,
+            "instance_name": name,
+            "private_image_uuid": private_image,
+            "reproduction_uuid": "",
+            "cg_application_uuid": "",
+            "cg_application_info": {},
+            "expand_data_disk": expand_data_disk,
+            "copy_data_disk_after_clone": copy_data_disk,
+            "keep_src_user_service_address_after_clone": keep_src_user_service_address,
+            "reproduction_id": 0,
+            "ft_sparse": True,
+        },
+        "price_info": {
+            "coupon_id_list": [],
+            "machine_id": machine,
+            "charge_type": CREATE_CHARGE_TYPE,
+            "duration": 1,
+            "num": 1,
+            "expand_data_disk": expand_data_disk,
+        },
+    }
+    payload = client.request("POST", INSTANCE_CLONE_PATH, json=body)
+    data = require_success_any(payload, action="clone instance")
+    if not isinstance(data, str) or not data.strip():
+        raise APIError("AutoDL clone instance returned malformed data")
+    new_uuid = data.strip()
+
+    return {
+        "instance_uuid": new_uuid,
+        "source_instance_uuid": source_uuid,
+        "machine_id": machine,
+        "gpu_amount": gpu_amount,
+        "charge_type": CREATE_CHARGE_TYPE,
+        "base_image_uuid": base_image,
+        "private_image_uuid": private_image,
+        "instance_name": name,
+        "expand_data_disk": expand_data_disk,
+        "copy_data_disk": copy_data_disk,
+        "keep_src_user_service_address": keep_src_user_service_address,
     }
 
 

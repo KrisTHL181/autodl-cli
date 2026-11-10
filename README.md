@@ -203,6 +203,10 @@ autodl instance create --machine-id 1c0641804d --image base-image-ee43618uo7
 autodl instance create --region nm-B2 --gpu "RTX 3090" --image base-image-ee43618uo7
 autodl instance create --machine-id 1c0641804d --private-image image-abcd1234 \
   --gpu-num 2 --name trainer --data-disk 50
+autodl instance clone <instance-uuid> --machine-id 1c0641804d
+autodl instance clone <instance-uuid> --region nm-B2 --gpu "RTX 3090"
+autodl instance clone <instance-uuid> --machine-id 1c0641804d --gpu-num 2 \
+  --name clone --data-disk 50 --no-copy-data-disk
 ```
 
 `power-on` posts to `/api/v1/instance/power_on`; AutoDL accepts the request
@@ -233,6 +237,14 @@ cards of the requested model is ordered on. Use `--image` for a base image or
 instance name, and extra data-disk size in GB (default 0). The command returns
 the new instance UUID immediately — the instance may take a moment to appear in
 `instance list` — and does not prompt for confirmation.
+
+`clone` posts to `/api/v1/order/instance/clone/payg` and orders a
+pay-as-you-go copy of an instance. Choose the target machine with
+`--machine-id` or both `--region` and `--gpu`, as with `create`. The image is
+always inherited from the source instance. `--gpu-num` defaults to the source
+instance's GPU count, `--copy-data-disk` is on by default (disable it with
+`--no-copy-data-disk`), and `--keep-service-address` is off. The command
+returns the new instance UUID immediately and does not prompt for confirmation.
 
 ### 🗂️ Network Disk (NFS)
 
