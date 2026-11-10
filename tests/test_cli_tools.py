@@ -310,6 +310,7 @@ def _patch_snipe(
     monkeypatch,
     *,
     events: bool = False,
+    clone_event: bool = False,
     captured: dict[str, object] | None = None,
     result_override: dict[str, object] | None = None,
 ) -> None:
@@ -317,6 +318,7 @@ def _patch_snipe(
 
     :param monkeypatch: pytest's monkeypatch fixture.
     :param events: Whether the fake should emit progress events.
+    :param clone_event: Whether the emitted ``found`` event announces clone mode.
     :param captured: Optional mapping that receives the call arguments.
     :param result_override: Optional result mapping replacing ``SNIPE_RESULT``.
     """
@@ -334,7 +336,10 @@ def _patch_snipe(
             }
             on_event({"event": "poll", "attempt": 1, "matches": 3, "cooling": 2})
             on_event({"event": "poll_failed", "error": "HTTP 500", "retries": 1, "limit": 3})
-            on_event({"event": "found", "machine": machine})
+            found_event: dict[str, object] = {"event": "found", "machine": machine}
+            if clone_event:
+                found_event["clone"] = True
+            on_event(found_event)
             on_event(
                 {
                     "event": "order_failed",
@@ -689,3 +694,120 @@ def test_snipe_help_lists_its_options(home: Path) -> None:
     assert "--strategy" in result.output
     assert "--parallel" in result.output
     assert "--count" in result.output
+
+
+def test_snipe_clone_forwards_its_options(home: Path, monkeypatch) -> None:
+    """``--clone`` replaces the image UUIDs and forwards the clone defaults."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--clone", "source-uuid"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["clone_instance_uuid"] == "source-uuid"
+    assert captured["base_image_uuid"] == ""
+    assert captured["private_image_uuid"] == ""
+    assert captured["copy_data_disk"] is True
+    assert captured["keep_src_user_service_address"] is False
+
+
+def test_snipe_clone_forwards_copy_and_keep_flags(home: Path, monkeypatch) -> None:
+    """``--no-copy-data-disk`` and ``--keep-service-address`` reach the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--clone",
+            "source-uuid",
+            "--no-copy-data-disk",
+            "--keep-service-address",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["copy_data_disk"] is False
+    assert captured["keep_src_user_service_address"] is True
+
+
+def test_snipe_clone_json_passes_the_result_through(home: Path, monkeypatch) -> None:
+    """``--json`` still emits only the handler result in clone mode."""
+    _seed_token()
+    _patch_snipe(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "tools", "snipe", "--gpu", "RTX 3090", "--clone", "source-uuid"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == SNIPE_RESULT
+
+
+@pytest.mark.parametrize(
+    "image_args",
+    [
+        ["--image", "base-image-x"],
+        ["--private-image", "image-y"],
+    ],
+)
+def test_snipe_clone_conflicts_with_image_flags(home: Path, monkeypatch, image_args: list[str]) -> None:
+    """``--clone`` and either image flag are mutually exclusive."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *call_args, **call_kwargs: pytest.fail("the handler must not run with conflicting images"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--clone", "source-uuid", *image_args],
+    )
+
+    assert result.exit_code == 2
+    assert "Use either --clone or --image/--private-image, not both." in result.output
+
+
+@pytest.mark.parametrize("args", [["--no-copy-data-disk"], ["--keep-service-address"]])
+def test_snipe_clone_only_flags_require_clone(home: Path, monkeypatch, args: list[str]) -> None:
+    """Clone-only flags are rejected outside clone mode."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *call_args, **call_kwargs: pytest.fail("the handler must not run with clone-only flags"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--image", "base-image-x", *args],
+    )
+
+    assert result.exit_code == 2
+    assert "--no-copy-data-disk and --keep-service-address require --clone." in result.output
+
+
+def test_snipe_renders_clone_found_event(home: Path, monkeypatch) -> None:
+    """A clone-mode ``found`` event says the machine is being cloned."""
+    _seed_token()
+    monkeypatch.setattr(tools_commands.output.console, "width", 200)
+    _patch_snipe(monkeypatch, events=True, clone_event=True)
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--clone", "source-uuid"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Found RTX 3090 on machine m-1 (西北B区); cloning..." in result.output

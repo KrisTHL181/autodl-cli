@@ -16,6 +16,8 @@ TOKEN = "fake-token"
 BASE_IMAGE = "base-image-ee43618uo7"
 PRIVATE_IMAGE = "image-abcd1234"
 INSTANCE_UUID = "snipe-instance-1"
+CLONE_SOURCE_UUID = "clone-source-1"
+CLONE_NEW_UUID = "clone-instance-1"
 REGION_LIST = [
     {
         "data_center": "westDC3",
@@ -1169,3 +1171,207 @@ def test_snipe_parallel_order_auth_error_propagates(fake_wait) -> None:
                 parallel=2,
                 interval=5.0,
             )
+
+
+def _clone_snapshot(base_image_uuid: str = BASE_IMAGE, image_type: str = "public") -> dict[str, object]:
+    """Build a source-instance snapshot for clone resolution.
+
+    :param base_image_uuid: Image UUID stored on the source instance.
+    :param image_type: Image type reported by AutoDL.
+    :returns: A snapshot mapping shaped like the real API response.
+    """
+    return {"image": {"base_image_uuid": base_image_uuid, "image_type": image_type}}
+
+
+def test_snipe_clone_inherits_the_image_and_skips_the_instance_list(fake_wait) -> None:
+    """Clone mode resolves the source image and orders clones without listing instances."""
+    requests: list[tuple[str, str]] = []
+    clone_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        requests.append((request.method, path))
+        if path == "/api/v1/instance/snapshot":
+            return _success(_clone_snapshot())
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page([_machine("m-1")]))
+        if path == "/api/v1/order/instance/clone/payg":
+            clone_bodies.append(json.loads(request.content))
+            return _success(CLONE_NEW_UUID)
+        if path == "/api/v1/instance":
+            return _success(_instance_page([{"uuid": CLONE_NEW_UUID, "status": "running"}]))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            clone_instance_uuid=f" {CLONE_SOURCE_UUID} ",
+            instance_name="clone-name",
+            expand_data_disk=20,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert len(clone_bodies) == 1
+    body = clone_bodies[0]
+    assert body["instance_uuid"] == CLONE_SOURCE_UUID
+    info = body["instance_info"]
+    assert info["machine_id"] == "m-1"
+    assert info["base_image_uuid"] == BASE_IMAGE
+    assert info["private_image_uuid"] == ""
+    assert info["req_gpu_amount"] == 1
+    assert info["instance_name"] == "clone-name"
+    assert info["expand_data_disk"] == 20
+    assert info["copy_data_disk_after_clone"] is True
+    assert info["keep_src_user_service_address_after_clone"] is False
+
+    # Clone resolution reads the snapshot, never the instance list: the only
+    # instance-list POST is the status poll after the clone order.
+    clone_index = next(
+        index
+        for index, (method, path) in enumerate(requests)
+        if method == "POST" and path == "/api/v1/order/instance/clone/payg"
+    )
+    snapshot_index = next(
+        index
+        for index, (method, path) in enumerate(requests)
+        if method == "GET" and path == "/api/v1/instance/snapshot"
+    )
+    instance_posts = [
+        index for index, (method, path) in enumerate(requests) if method == "POST" and path == "/api/v1/instance"
+    ]
+    assert snapshot_index < clone_index
+    assert instance_posts == [clone_index + 1]
+
+    found = [event for event in events if event["event"] == "found"]
+    assert len(found) == 1
+    assert found[0]["clone"] is True
+
+    assert result["instance_uuid"] == CLONE_NEW_UUID
+    assert result["source_instance_uuid"] == CLONE_SOURCE_UUID
+    assert result["gpu_amount"] == 1
+    assert result["base_image_uuid"] == BASE_IMAGE
+    assert result["instances"][0]["source_instance_uuid"] == CLONE_SOURCE_UUID
+
+
+def test_snipe_clone_forwards_gpu_and_copy_flags(fake_wait) -> None:
+    """Clone mode forwards its own GPU count, flags, name, and disk size."""
+    clone_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/instance/snapshot":
+            return _success(_clone_snapshot())
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page([_machine("m-1")]))
+        if path == "/api/v1/order/instance/clone/payg":
+            clone_bodies.append(json.loads(request.content))
+            return _success(CLONE_NEW_UUID)
+        if path == "/api/v1/instance":
+            return _success(_instance_page([{"uuid": CLONE_NEW_UUID, "status": "running"}]))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            clone_instance_uuid=CLONE_SOURCE_UUID,
+            gpu_amount=2,
+            instance_name=" copy ",
+            expand_data_disk=30,
+            copy_data_disk=False,
+            keep_src_user_service_address=True,
+            interval=5.0,
+        )
+
+    info = clone_bodies[0]["instance_info"]
+    assert info["req_gpu_amount"] == 2
+    assert info["instance_name"] == "copy"
+    assert info["expand_data_disk"] == 30
+    assert info["copy_data_disk_after_clone"] is False
+    assert info["keep_src_user_service_address_after_clone"] is True
+    assert result["gpu_amount"] == 2
+    assert result["source_instance_uuid"] == CLONE_SOURCE_UUID
+
+
+def test_snipe_clone_private_image_sends_private_uuid(fake_wait) -> None:
+    """A private source image is sent as ``private_image_uuid`` with a blank base image."""
+    clone_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/instance/snapshot":
+            return _success(_clone_snapshot(PRIVATE_IMAGE, "private"))
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page([_machine("m-1")]))
+        if path == "/api/v1/order/instance/clone/payg":
+            clone_bodies.append(json.loads(request.content))
+            return _success(CLONE_NEW_UUID)
+        if path == "/api/v1/instance":
+            return _success(_instance_page([{"uuid": CLONE_NEW_UUID, "status": "running"}]))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            clone_instance_uuid=CLONE_SOURCE_UUID,
+            interval=5.0,
+        )
+
+    info = clone_bodies[0]["instance_info"]
+    assert info["base_image_uuid"] == ""
+    assert info["private_image_uuid"] == PRIVATE_IMAGE
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        (
+            {"gpu_types": ("RTX 3090",), "clone_instance_uuid": CLONE_SOURCE_UUID, "base_image_uuid": BASE_IMAGE},
+            "cannot be combined",
+        ),
+        (
+            {"gpu_types": ("RTX 3090",), "clone_instance_uuid": CLONE_SOURCE_UUID, "private_image_uuid": PRIVATE_IMAGE},
+            "cannot be combined",
+        ),
+        ({"gpu_types": ("RTX 3090",)}, "exactly one"),
+    ],
+)
+def test_snipe_clone_rejects_conflicting_or_missing_images(kwargs: dict[str, object], message: str) -> None:
+    """Clone mode and image UUIDs are mutually exclusive, and an image is still required otherwise."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for invalid options")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=message):
+            snipe_module.snipe(client, **kwargs)
+
+
+def test_snipe_clone_propagates_a_snapshot_auth_error(fake_wait) -> None:
+    """Authentication failures from clone resolution propagate before polling starts."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/v1/instance/snapshot":
+            return httpx.Response(401, json={"msg": "bad token"})
+        pytest.fail(f"unexpected request {request.method} {request.url.path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="bad token"):
+            snipe_module.snipe(
+                client,
+                gpu_types=("RTX 3090",),
+                clone_instance_uuid=CLONE_SOURCE_UUID,
+                interval=2.0,
+                retry=3,
+                on_event=events.append,
+            )
+
+    assert calls == ["/api/v1/instance/snapshot"]
+    assert events == []

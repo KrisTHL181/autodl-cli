@@ -3,10 +3,12 @@
 :func:`select_machine` is a pure ranking function over the normalised machine
 records returned by :func:`autodl_cli.handlers.gpu.list_machines`.
 :func:`snipe` polls that listing and orders candidates through
-:func:`autodl_cli.handlers.instance.create_instance`, optionally trying several
-machines concurrently. It keeps the best-ranked successes, immediately powers
-off and releases any surplus orders, then waits for the kept instances to
-report ``running``. Progress is reported through an optional ``on_event``
+:func:`autodl_cli.handlers.instance.create_instance` or, in clone mode, through
+:func:`autodl_cli.handlers.instance.clone_instance`, optionally trying several
+machines concurrently. Clone mode inherits the image from the source instance
+but keeps its own GPU count. It keeps the best-ranked successes, immediately
+powers off and releases any surplus orders, then waits for the kept instances
+to report ``running``. Progress is reported through an optional ``on_event``
 callback; handlers never write to the terminal.
 """
 
@@ -307,12 +309,14 @@ def _instance_record(
     """Build the flat per-instance record returned by :func:`snipe`.
 
     :param order: Order mapping returned by
-        :func:`autodl_cli.handlers.instance.create_instance`.
+        :func:`autodl_cli.handlers.instance.create_instance` or
+        :func:`autodl_cli.handlers.instance.clone_instance`.
     :param machine: Machine record the order was placed on.
     :param status: ``running`` for kept instances, ``released`` for surplus ones.
-    :returns: A flat mapping combining the order and machine fields.
+    :returns: A flat mapping combining the order and machine fields. Clone
+        orders also contribute ``source_instance_uuid``.
     """
-    return {
+    record: dict[str, object] = {
         "instance_uuid": str(order["instance_uuid"]),
         "machine_id": machine.get("machine_id"),
         "machine_alias": machine.get("machine_alias"),
@@ -329,6 +333,10 @@ def _instance_record(
         "expand_data_disk": order.get("expand_data_disk", 0),
         "status": status,
     }
+    source_uuid = order.get("source_instance_uuid")
+    if isinstance(source_uuid, str) and source_uuid:
+        record["source_instance_uuid"] = source_uuid
+    return record
 
 
 def snipe(
@@ -343,6 +351,9 @@ def snipe(
     count: int = 1,
     base_image_uuid: str = "",
     private_image_uuid: str = "",
+    clone_instance_uuid: str = "",
+    copy_data_disk: bool = True,
+    keep_src_user_service_address: bool = False,
     instance_name: str = "",
     expand_data_disk: int = 0,
     interval: float = DEFAULT_INTERVAL,
@@ -374,6 +385,14 @@ def snipe(
     immediately. Cleanup is not bounded by ``timeout``: the handler always
     attempts to release every surplus order, even after the deadline.
 
+    In clone mode, ``clone_instance_uuid`` names the source instance and the
+    image is inherited from its snapshot; ``base_image_uuid`` and
+    ``private_image_uuid`` must then be empty. The source's GPU count is not
+    inherited: ``gpu_amount`` keeps the caller's value (the command's
+    ``--gpu-num`` defaults to 1) and is sent with every clone order.
+    ``copy_data_disk`` defaults to ``True`` and
+    ``keep_src_user_service_address`` to ``False``.
+
     Events are mappings whose ``event`` key is ``poll``, ``poll_failed``,
     ``found``, ``order_failed``, ``ordered``, ``releasing_extra``,
     ``extra_power_off_failed``, ``extra_released``, ``extra_release_failed``,
@@ -394,9 +413,15 @@ def snipe(
     :param count: Instances to keep; surplus successes are released. Must be at
         least 1.
     :param base_image_uuid: Base-image UUID; mutually exclusive with
-        ``private_image_uuid``.
+        ``private_image_uuid`` and ``clone_instance_uuid``.
     :param private_image_uuid: Private-image UUID; mutually exclusive with
-        ``base_image_uuid``.
+        ``base_image_uuid`` and ``clone_instance_uuid``.
+    :param clone_instance_uuid: Source instance to clone; mutually exclusive
+        with both image UUIDs. The source's image is inherited, but its GPU
+        count is not.
+    :param copy_data_disk: Whether a clone copies the source's data disk.
+    :param keep_src_user_service_address: Whether a clone keeps the source's
+        user service address.
     :param instance_name: Optional name for the new instances.
     :param expand_data_disk: Extra data-disk size in GB.
     :param interval: Seconds between checks; must be positive.
@@ -409,7 +434,8 @@ def snipe(
         ``instances`` (all kept instances in rank order),
         ``released_instances`` (surplus instances that were released),
         ``release_failures``, ``count``, ``parallel``, ``attempts``, and
-        ``elapsed_seconds``.
+        ``elapsed_seconds``. Clone-mode records also carry
+        ``source_instance_uuid``.
     :raises ValueError: When an argument is invalid or neither ``regions`` nor
         ``gpu_types`` is supplied, before any request is sent.
     :raises TimeoutError: When ``timeout`` expires without ordering or starting
@@ -434,9 +460,15 @@ def snipe(
     if isinstance(retry, bool) or not isinstance(retry, int) or retry < 0:
         raise ValueError("retry must be an integer of at least 0")
 
+    clone_source = clone_instance_uuid.strip()
     base_image = base_image_uuid.strip()
     private_image = private_image_uuid.strip()
-    if bool(base_image) == bool(private_image):
+    if clone_source:
+        if base_image or private_image:
+            raise ValueError("clone_instance_uuid cannot be combined with base_image_uuid or private_image_uuid")
+        base_image = ""
+        private_image = ""
+    elif bool(base_image) == bool(private_image):
         raise ValueError("exactly one of base_image_uuid and private_image_uuid must be set")
 
     region_texts = tuple(region.strip() for region in regions)
@@ -457,6 +489,11 @@ def snipe(
         known_regions = gpu_handler.list_regions(client)
         for region in gpu_handler.select_regions(known_regions, region_texts):
             region_sign_list.extend(gpu_handler.region_signs(region))
+
+    if clone_source:
+        resolved_image = instance_handler.resolve_clone_image(client, clone_source)
+        base_image = str(resolved_image["base_image_uuid"])
+        private_image = str(resolved_image["private_image_uuid"])
 
     attempt = 0
     kept: list[tuple[dict[str, object], dict[str, object]]] = []
@@ -513,9 +550,25 @@ def snipe(
 
         to_try = ready[:parallel]
         for candidate in to_try:
-            _emit(on_event, {"event": "found", "machine": candidate})
+            found_event: dict[str, object] = {"event": "found", "machine": candidate}
+            if clone_source:
+                found_event["clone"] = True
+            _emit(on_event, found_event)
 
         def place_order(target: dict[str, object]) -> dict[str, object]:
+            if clone_source:
+                return instance_handler.clone_instance(
+                    client,
+                    clone_source,
+                    machine_id=str(target["machine_id"]),
+                    base_image_uuid=base_image,
+                    private_image_uuid=private_image,
+                    gpu_amount=gpu_amount,
+                    instance_name=instance_name,
+                    expand_data_disk=expand_data_disk,
+                    copy_data_disk=copy_data_disk,
+                    keep_src_user_service_address=keep_src_user_service_address,
+                )
             return instance_handler.create_instance(
                 client,
                 machine_id=str(target["machine_id"]),

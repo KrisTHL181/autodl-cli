@@ -55,8 +55,10 @@ machine with enough idle cards.
 Cloning an instance posts the web console's order body to
 ``POST /api/v1/order/instance/clone/payg``. The image and GPU count are
 inherited from the source instance: :func:`resolve_clone_source` reads the
-snapshot for the image and the instance list for ``req_gpu_amount``. Like
-create, the response's ``data`` is the new instance UUID string.
+snapshot for the image and the instance list for ``req_gpu_amount``.
+:func:`resolve_clone_image` resolves the image alone, for callers such as
+``tools snipe --clone`` that choose their own GPU count. Like create, the
+response's ``data`` is the new instance UUID string.
 """
 
 from __future__ import annotations
@@ -404,27 +406,24 @@ def create_instance(
     }
 
 
-def resolve_clone_source(client: AutoDLClient, instance_uuid: str) -> dict[str, object]:
-    """Resolve the image and GPU count to carry over when cloning.
+def resolve_clone_image(client: AutoDLClient, instance_uuid: str) -> dict[str, object]:
+    """Resolve the image to carry over when cloning an instance.
 
-    The snapshot names the source instance's image, but not how many GPUs it
-    uses. That count lives in the instance list, so the source is looked up
-    there by exact UUID. The list endpoint's ``query`` is a substring match, so
-    a result is accepted only when its ``uuid`` equals ``instance_uuid``.
+    The source instance's snapshot names its image. An image is treated as
+    private when the snapshot says so, or when its type is unknown but its UUID
+    uses the ``image-`` private-image prefix. Every other image is treated as a
+    base image.
 
-    An image is treated as private when the snapshot says so, or when its type
-    is unknown but its UUID uses the ``image-`` private-image prefix. Every
-    other image is treated as a base image.
+    This resolves only the image; :func:`resolve_clone_source` additionally
+    looks up the GPU count in the instance list.
 
     :param client: Authenticated API client.
     :param instance_uuid: Source instance UUID from :func:`list_instances`.
-    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``,
-        ``private_image_uuid``, and ``gpu_amount``.
+    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``, and
+        ``private_image_uuid``.
     :raises ValueError: When ``instance_uuid`` is blank.
     :raises autodl_cli.errors.AuthError: When the token is rejected.
-    :raises autodl_cli.errors.APIError: When the snapshot or instance list is
-        malformed, the GPU amount cannot be determined, or the source is not in
-        the instance list.
+    :raises autodl_cli.errors.APIError: When the snapshot is malformed.
     """
     source_uuid = instance_uuid.strip()
     if not source_uuid:
@@ -444,6 +443,35 @@ def resolve_clone_source(client: AutoDLClient, instance_uuid: str) -> dict[str, 
     base_image = "" if is_private else image_uuid
     private_image = image_uuid if is_private else ""
 
+    return {
+        "instance_uuid": source_uuid,
+        "base_image_uuid": base_image,
+        "private_image_uuid": private_image,
+    }
+
+
+def resolve_clone_source(client: AutoDLClient, instance_uuid: str) -> dict[str, object]:
+    """Resolve the image and GPU count to carry over when cloning.
+
+    The snapshot names the source instance's image, but not how many GPUs it
+    uses. That count lives in the instance list, so the source is looked up
+    there by exact UUID. The list endpoint's ``query`` is a substring match, so
+    a result is accepted only when its ``uuid`` equals ``instance_uuid``. The
+    image itself is resolved by :func:`resolve_clone_image`.
+
+    :param client: Authenticated API client.
+    :param instance_uuid: Source instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``,
+        ``private_image_uuid``, and ``gpu_amount``.
+    :raises ValueError: When ``instance_uuid`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the snapshot or instance list is
+        malformed, the GPU amount cannot be determined, or the source is not in
+        the instance list.
+    """
+    resolved = resolve_clone_image(client, instance_uuid)
+    source_uuid = str(resolved["instance_uuid"])
+
     for instance in list_instances(client, query=source_uuid):
         if instance.get("uuid") != source_uuid:
             continue
@@ -452,8 +480,8 @@ def resolve_clone_source(client: AutoDLClient, instance_uuid: str) -> dict[str, 
             raise APIError(f"AutoDL could not determine the GPU amount of instance {source_uuid!r}")
         return {
             "instance_uuid": source_uuid,
-            "base_image_uuid": base_image,
-            "private_image_uuid": private_image,
+            "base_image_uuid": resolved["base_image_uuid"],
+            "private_image_uuid": resolved["private_image_uuid"],
             "gpu_amount": gpu_amount,
         }
 

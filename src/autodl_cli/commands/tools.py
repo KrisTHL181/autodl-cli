@@ -272,9 +272,10 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     if kind == "found":
         machine = event.get("machine")
         machine = machine if isinstance(machine, dict) else {}
+        action = "cloning..." if event.get("clone") else "ordering..."
         output.info(
             f"Found {machine.get('gpu_name', '')} on machine {machine.get('machine_id', '')} "
-            f"({machine.get('region_name', '')}); ordering..."
+            f"({machine.get('region_name', '')}); {action}"
         )
         return
     if kind == "order_failed":
@@ -391,6 +392,26 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     default="",
     help="Private-image UUID from `autodl image list-private`.",
 )
+@click.option(
+    "--clone",
+    "clone_instance_uuid",
+    metavar="INSTANCE_UUID",
+    default="",
+    help="Clone this source instance instead of booting from an image.",
+)
+@click.option(
+    "--copy-data-disk/--no-copy-data-disk",
+    "copy_data_disk",
+    default=True,
+    show_default=True,
+    help="Copy the source instance's data disk (requires --clone).",
+)
+@click.option(
+    "--keep-service-address",
+    "keep_service_address",
+    is_flag=True,
+    help="Keep the source instance's user service address (requires --clone).",
+)
 @click.option("--name", "-n", default="", help="Instance name.")
 @click.option(
     "--data-disk",
@@ -432,6 +453,9 @@ def snipe_command(
     count: int,
     base_image_uuid: str,
     private_image_uuid: str,
+    clone_instance_uuid: str,
+    copy_data_disk: bool,
+    keep_service_address: bool,
     name: str,
     data_disk: int,
     interval: float,
@@ -442,11 +466,16 @@ def snipe_command(
 
     At least one of ``--region`` and ``--gpu`` is required. ``--max-price`` and
     ``--gpu-num`` only narrow the search; they do not select a target on their
-    own. Exactly one of ``--image`` and ``--private-image`` must be set. The
-    command blocks until the ordered instances are running or ``--timeout``
-    expires. ``--parallel`` tries several ranked machines per poll, and
-    ``--count`` keeps that many instances; any extra successful orders are
-    powered off and released immediately (cleanup is not bounded by
+    own. Exactly one of ``--image`` and ``--private-image`` must be set, unless
+    ``--clone`` names a source instance; that source's image is inherited and
+    the two image flags are then rejected. ``--gpu-num`` is not inherited from
+    the source and still defaults to 1. A clone copies the source's data disk
+    unless ``--no-copy-data-disk`` is given, and does not keep its user service
+    address unless ``--keep-service-address`` is given; both flags require
+    ``--clone``. The command blocks until the ordered instances are running or
+    ``--timeout`` expires. ``--parallel`` tries several ranked machines per
+    poll, and ``--count`` keeps that many instances; any extra successful
+    orders are powered off and released immediately (cleanup is not bounded by
     ``--timeout``). Transient API errors while polling are retried ``--retry``
     times consecutively; authentication errors are never retried and ``0``
     disables retries. A machine whose order is rejected is skipped for an
@@ -463,21 +492,32 @@ def snipe_command(
     :param count: Number of instances to keep.
     :param base_image_uuid: Base-image UUID to boot from.
     :param private_image_uuid: Private-image UUID to boot from.
+    :param clone_instance_uuid: Source instance UUID to clone; mutually
+        exclusive with the image UUIDs.
+    :param copy_data_disk: Whether a clone copies the source's data disk.
+    :param keep_service_address: Whether a clone keeps the source's user
+        service address.
     :param name: Optional instance name.
     :param data_disk: Extra data-disk size in GB.
     :param interval: Seconds between stock checks.
     :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
     :param retry: Consecutive transient polling errors to retry; ``0``
         disables retries.
-    :raises click.UsageError: When no targeting filter or the wrong number of
-        image UUIDs is supplied.
+    :raises click.UsageError: When no targeting filter is supplied, the image
+        flags conflict with ``--clone``, the wrong number of image UUIDs is
+        supplied, or clone-only flags are used without ``--clone``.
     :raises click.ClickException: When no token is configured, the request
         fails, or the snipe times out.
     """
+    clone_mode = bool(clone_instance_uuid.strip())
     if not regions and not gpu_types:
         raise click.UsageError("Pass at least one of --region or --gpu.")
-    if bool(base_image_uuid.strip()) == bool(private_image_uuid.strip()):
+    if clone_mode and (base_image_uuid.strip() or private_image_uuid.strip()):
+        raise click.UsageError("Use either --clone or --image/--private-image, not both.")
+    if not clone_mode and bool(base_image_uuid.strip()) == bool(private_image_uuid.strip()):
         raise click.UsageError("Pass exactly one of --image and --private-image.")
+    if not clone_mode and (not copy_data_disk or keep_service_address):
+        raise click.UsageError("--no-copy-data-disk and --keep-service-address require --clone.")
 
     config = load_config()
     token = require_token(config)
@@ -496,6 +536,9 @@ def snipe_command(
                 count=count,
                 base_image_uuid=base_image_uuid,
                 private_image_uuid=private_image_uuid,
+                clone_instance_uuid=clone_instance_uuid,
+                copy_data_disk=copy_data_disk,
+                keep_src_user_service_address=keep_service_address,
                 instance_name=name,
                 expand_data_disk=data_disk,
                 interval=interval,

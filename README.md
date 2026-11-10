@@ -115,6 +115,13 @@ narrow the search. `--strategy` chooses the cheapest (`price`, the default),
 the most idle cards (`idle`), or the first result returned (`first`), and
 exactly one of `--image` and `--private-image` is required.
 
+`--clone INSTANCE_UUID` replaces the image flags: the clone inherits the source
+instance's image, but not its GPU count, so `--gpu-num` still defaults to 1 and
+keeps narrowing the search. Targeting still uses `--region` or `--gpu`. Clones
+copy the source's data disk by default; pass `--no-copy-data-disk` to skip that.
+The source's user service address is not kept unless `--keep-service-address`
+is given.
+
 `--parallel N` tries up to N ranked machines per poll instead of one. Because
 listings can be stale by the time an order is placed, several attempts may
 succeed; `--count N` keeps the N best-ranked successes (default 1). Any surplus
@@ -127,6 +134,8 @@ autodl tools snipe --region nm-B2 --gpu "RTX 3090" --max-price 1.5 --image base-
 autodl tools snipe --gpu "RTX 4090" --gpu-num 2 --private-image image-abcd1234 --interval 5 --timeout 600
 autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --parallel 3
 autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --count 2 --parallel 3
+autodl tools snipe --region nm-B2 --gpu "RTX 4090" --clone instance-1234abcd
+autodl tools snipe --gpu "RTX 4090" --clone instance-1234abcd --no-copy-data-disk --keep-service-address
 ```
 
 Transient API errors during polling (rate limits or 5xx responses) can be
