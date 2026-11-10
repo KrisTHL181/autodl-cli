@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import httpx
 import pytest
@@ -288,7 +289,7 @@ def test_snipe_orders_after_an_empty_poll_and_waits_for_running(fake_wait) -> No
             on_event=events.append,
         )
 
-    assert result == {
+    flat = {
         "instance_uuid": INSTANCE_UUID,
         "machine_id": "m-1",
         "machine_alias": "worker",
@@ -304,6 +305,14 @@ def test_snipe_orders_after_an_empty_poll_and_waits_for_running(fake_wait) -> No
         "instance_name": "trainer",
         "expand_data_disk": 50,
         "status": "running",
+    }
+    assert result == {
+        **flat,
+        "instances": [flat],
+        "released_instances": [],
+        "release_failures": [],
+        "count": 1,
+        "parallel": 1,
         "attempts": 2,
         "elapsed_seconds": 10.0,
     }
@@ -641,6 +650,10 @@ def test_snipe_resolves_a_region_once_and_forwards_its_signs(fake_wait) -> None:
         ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "strategy": "cheapest"}, "strategy"),
         ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "retry": -1}, "retry"),
         ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "retry": True}, "retry"),
+        ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "parallel": 0}, "parallel"),
+        ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "parallel": True}, "parallel"),
+        ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "count": 0}, "count"),
+        ({"gpu_types": ("RTX 3090",), "base_image_uuid": BASE_IMAGE, "count": True}, "count"),
     ],
 )
 def test_snipe_rejects_invalid_options_before_any_request(
@@ -825,3 +838,334 @@ def test_snipe_never_retries_auth_errors(fake_wait) -> None:
 
     assert calls == [1]
     assert events == []
+
+
+def _instance_entries(*machine_ids: str) -> list[dict[str, object]]:
+    """Build running instance-list entries for the given machine IDs.
+
+    :param machine_ids: Machine identifiers whose orders succeeded.
+    :returns: One running entry per machine.
+    """
+    return [{"uuid": f"inst-{machine_id}", "status": "running"} for machine_id in machine_ids]
+
+
+def test_snipe_parallel_keeps_the_best_and_releases_extras(fake_wait) -> None:
+    """``parallel=3`` with one needed instance keeps the top rank and releases two extras."""
+    lock = threading.Lock()
+    lifecycle_calls: list[tuple[str, str]] = []
+    machines = [
+        _machine("m-a", price=1000),
+        _machine("m-b", price=2000),
+        _machine("m-c", price=3000),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            return _success(f"inst-{machine_id}")
+        if path == "/api/v1/instance/power_off":
+            instance_uuid = json.loads(request.content)["instance_uuid"]
+            with lock:
+                lifecycle_calls.append(("power_off", instance_uuid))
+            return _success(None)
+        if path == "/api/v1/instance/release":
+            instance_uuid = json.loads(request.content)["instance_uuid"]
+            with lock:
+                lifecycle_calls.append(("release", instance_uuid))
+            return _success(None)
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-a")))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=3,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert result["attempts"] == 1
+    assert [record["instance_uuid"] for record in result["instances"]] == ["inst-m-a"]
+    assert [record["instance_uuid"] for record in result["released_instances"]] == ["inst-m-b", "inst-m-c"]
+    assert [record["status"] for record in result["released_instances"]] == ["released", "released"]
+    assert result["release_failures"] == []
+    assert lifecycle_calls == [
+        ("power_off", "inst-m-b"),
+        ("release", "inst-m-b"),
+        ("power_off", "inst-m-c"),
+        ("release", "inst-m-c"),
+    ]
+
+    kept_events = [event for event in events if event["event"] == "ordered" and not event.get("extra")]
+    assert [event["instance_uuid"] for event in kept_events] == ["inst-m-a"]
+    extra_events = [event for event in events if event["event"] == "ordered" and event.get("extra")]
+    assert [event["instance_uuid"] for event in extra_events] == ["inst-m-b", "inst-m-c"]
+    assert [(event["event"], event["instance_uuid"]) for event in events if event["event"] == "releasing_extra"] == [
+        ("releasing_extra", "inst-m-b"),
+        ("releasing_extra", "inst-m-c"),
+    ]
+    assert [event["instance_uuid"] for event in events if event["event"] == "extra_released"] == [
+        "inst-m-b",
+        "inst-m-c",
+    ]
+
+
+def test_snipe_parallel_keeps_count_instances_and_releases_one_extra(fake_wait) -> None:
+    """``count=2`` keeps two ranked successes, releases the third, and waits for both."""
+    lock = threading.Lock()
+    lifecycle_calls: list[tuple[str, str]] = []
+    machines = [
+        _machine("m-a", price=1000),
+        _machine("m-b", price=2000),
+        _machine("m-c", price=3000),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            return _success(f"inst-{machine_id}")
+        if path == "/api/v1/instance/power_off":
+            with lock:
+                lifecycle_calls.append(("power_off", json.loads(request.content)["instance_uuid"]))
+            return _success(None)
+        if path == "/api/v1/instance/release":
+            with lock:
+                lifecycle_calls.append(("release", json.loads(request.content)["instance_uuid"]))
+            return _success(None)
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-a", "m-b", "m-c")))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=3,
+            count=2,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert result["count"] == 2
+    assert [record["instance_uuid"] for record in result["instances"]] == ["inst-m-a", "inst-m-b"]
+    assert [record["instance_uuid"] for record in result["released_instances"]] == ["inst-m-c"]
+    assert lifecycle_calls == [("power_off", "inst-m-c"), ("release", "inst-m-c")]
+    assert [event["instance_uuid"] for event in events if event["event"] == "running"] == [
+        "inst-m-a",
+        "inst-m-b",
+    ]
+
+
+def test_snipe_parallel_keeps_a_success_when_a_sibling_order_fails(fake_wait) -> None:
+    """A rejected machine cools down while the successful sibling order is kept."""
+    machines = [_machine("m-cheap", price=1000), _machine("m-other", price=2000)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            if machine_id == "m-cheap":
+                return _failure("no capacity")
+            return _success("inst-m-other")
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-other")))
+        if path == "/api/v1/instance/power_off" or path == "/api/v1/instance/release":
+            pytest.fail("no surplus orders were placed")
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=2,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert result["attempts"] == 1
+    assert result["instance_uuid"] == "inst-m-other"
+    failed = [event for event in events if event["event"] == "order_failed"]
+    assert len(failed) == 1
+    assert failed[0]["machine_id"] == "m-cheap"
+    assert failed[0]["failures"] == 1
+    assert failed[0]["backoff"] == 5.0
+    assert not any(event["event"] == "releasing_extra" for event in events)
+
+
+def test_snipe_parallel_retries_after_a_fully_failed_round(fake_wait) -> None:
+    """When every order in a round fails, the cooldowns expire and the next round succeeds."""
+    _, delays = fake_wait
+    lock = threading.Lock()
+    create_calls = 0
+    machines = [_machine("m-1", price=1000), _machine("m-2", price=2000)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_calls
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            with lock:
+                create_calls += 1
+                attempt = create_calls
+            if attempt <= 2:
+                return _failure("no capacity")
+            return _success(f"inst-{machine_id}")
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-1", "m-2")))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=2,
+            count=2,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert create_calls == 4
+    assert result["attempts"] == 3
+    assert [record["instance_uuid"] for record in result["instances"]] == ["inst-m-1", "inst-m-2"]
+    failed = [event for event in events if event["event"] == "order_failed"]
+    assert sorted((event["machine_id"], event["failures"], event["backoff"]) for event in failed) == [
+        ("m-1", 1, 5.0),
+        ("m-2", 1, 5.0),
+    ]
+    polls = [event for event in events if event["event"] == "poll"]
+    assert [poll["cooling"] for poll in polls] == [0, 2, 0]
+    assert delays == [5.0]
+
+
+def test_snipe_releases_an_extra_even_when_power_off_fails(fake_wait) -> None:
+    """A failed power-off is reported, but the surplus instance is still released."""
+    lock = threading.Lock()
+    released: list[str] = []
+    machines = [_machine("m-a", price=1000), _machine("m-b", price=2000)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            return _success(f"inst-{machine_id}")
+        if path == "/api/v1/instance/power_off":
+            return _failure("power off refused")
+        if path == "/api/v1/instance/release":
+            with lock:
+                released.append(json.loads(request.content)["instance_uuid"])
+            return _success(None)
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-a")))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=2,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    power_off_failures = [event for event in events if event["event"] == "extra_power_off_failed"]
+    assert len(power_off_failures) == 1
+    assert power_off_failures[0]["instance_uuid"] == "inst-m-b"
+    assert "power off refused" in str(power_off_failures[0]["error"])
+    assert released == ["inst-m-b"]
+    assert [record["instance_uuid"] for record in result["released_instances"]] == ["inst-m-b"]
+    assert result["release_failures"] == []
+
+
+def test_snipe_retries_a_failed_extra_release_and_reports_it(fake_wait) -> None:
+    """A surplus release is retried, then reported without aborting the run."""
+    _, delays = fake_wait
+    lock = threading.Lock()
+    release_calls = 0
+    machines = [_machine("m-a", price=1000), _machine("m-b", price=2000)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal release_calls
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            machine_id = json.loads(request.content)["instance_info"]["machine_id"]
+            return _success(f"inst-{machine_id}")
+        if path == "/api/v1/instance/power_off":
+            return _success(None)
+        if path == "/api/v1/instance/release":
+            with lock:
+                release_calls += 1
+            return _failure("release denied")
+        if path == "/api/v1/instance":
+            return _success(_instance_page(_instance_entries("m-a")))
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = snipe_module.snipe(
+            client,
+            gpu_types=("RTX 3090",),
+            base_image_uuid=BASE_IMAGE,
+            parallel=2,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert release_calls == snipe_module.EXTRA_RELEASE_ATTEMPTS
+    assert result["released_instances"] == []
+    assert len(result["release_failures"]) == 1
+    assert result["release_failures"][0]["instance_uuid"] == "inst-m-b"
+    assert "release denied" in str(result["release_failures"][0]["error"])
+    failed = [event for event in events if event["event"] == "extra_release_failed"]
+    assert len(failed) == 1
+    assert failed[0]["instance_uuid"] == "inst-m-b"
+    assert result["status"] == "running"
+    assert delays == [5.0, 5.0]
+
+
+def test_snipe_parallel_order_auth_error_propagates(fake_wait) -> None:
+    """An authentication failure from a concurrent order aborts the run."""
+    machines = [_machine("m-1", price=1000), _machine("m-2", price=2000)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/user/machine/list":
+            return _success(_machine_page(machines))
+        if path == "/api/v1/order/instance/create/payg":
+            return httpx.Response(401, json={"msg": "bad token"})
+        pytest.fail(f"unexpected request {request.method} {path}")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="bad token"):
+            snipe_module.snipe(
+                client,
+                gpu_types=("RTX 3090",),
+                base_image_uuid=BASE_IMAGE,
+                parallel=2,
+                interval=5.0,
+            )

@@ -115,9 +115,18 @@ narrow the search. `--strategy` chooses the cheapest (`price`, the default),
 the most idle cards (`idle`), or the first result returned (`first`), and
 exactly one of `--image` and `--private-image` is required.
 
+`--parallel N` tries up to N ranked machines per poll instead of one. Because
+listings can be stale by the time an order is placed, several attempts may
+succeed; `--count N` keeps the N best-ranked successes (default 1). Any surplus
+orders are powered off and released immediately, before waiting for the kept
+instances to start, and cleanup is never cut short by `--timeout`. The
+single-instance default (`--parallel 1 --count 1`) behaves as before.
+
 ```bash
 autodl tools snipe --region nm-B2 --gpu "RTX 3090" --max-price 1.5 --image base-image-ee43618uo7
 autodl tools snipe --gpu "RTX 4090" --gpu-num 2 --private-image image-abcd1234 --interval 5 --timeout 600
+autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --parallel 3
+autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --count 2 --parallel 3
 ```
 
 Transient API errors during polling (rate limits or 5xx responses) can be

@@ -289,9 +289,36 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     if kind == "ordered":
         machine = event.get("machine")
         machine = machine if isinstance(machine, dict) else {}
-        output.success(
-            f"Ordered instance {event.get('instance_uuid', '')} on machine "
-            f"{machine.get('machine_id', '')}; waiting for it to start..."
+        if event.get("extra"):
+            output.info(
+                f"Ordered surplus instance {event.get('instance_uuid', '')} on machine "
+                f"{machine.get('machine_id', '')}; powering off and releasing it..."
+            )
+        else:
+            output.success(
+                f"Ordered instance {event.get('instance_uuid', '')} on machine "
+                f"{machine.get('machine_id', '')}; waiting for it to start..."
+            )
+        return
+    if kind == "releasing_extra":
+        machine = event.get("machine")
+        machine = machine if isinstance(machine, dict) else {}
+        output.info(
+            f"Releasing surplus instance {event.get('instance_uuid', '')} on machine {machine.get('machine_id', '')}..."
+        )
+        return
+    if kind == "extra_power_off_failed":
+        output.warning(
+            f"Could not power off surplus instance {event.get('instance_uuid', '')}: "
+            f"{event.get('error', '')}; releasing it anyway."
+        )
+        return
+    if kind == "extra_released":
+        output.success(f"Released surplus instance {event.get('instance_uuid', '')}.")
+        return
+    if kind == "extra_release_failed":
+        output.warning(
+            f"Could not release surplus instance {event.get('instance_uuid', '')}: {event.get('error', '')}."
         )
         return
     if kind == "instance_status":
@@ -302,7 +329,7 @@ def _render_snipe_event(event: dict[str, object]) -> None:
             output.info(f"Instance status: {status}.")
         return
     if kind == "running":
-        output.info("Instance is running.")
+        output.info(f"Instance {event.get('instance_uuid', '')} is running.")
 
 
 @tools.command("snipe", help="Watch GPU stock and order a machine as soon as one is available.")
@@ -342,6 +369,20 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     default="price",
     show_default=True,
     help="Order matching machines by price, idle capacity, or the first result.",
+)
+@click.option(
+    "--parallel",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Machines to try ordering concurrently each poll; surplus orders are released.",
+)
+@click.option(
+    "--count",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of instances to keep; surplus successful orders are released.",
 )
 @click.option("--image", "-i", "base_image_uuid", default="", help="Base-image UUID from `autodl image list`.")
 @click.option(
@@ -387,6 +428,8 @@ def snipe_command(
     gpu_num: int,
     max_price: float | None,
     strategy: str,
+    parallel: int,
+    count: int,
     base_image_uuid: str,
     private_image_uuid: str,
     name: str,
@@ -400,11 +443,15 @@ def snipe_command(
     At least one of ``--region`` and ``--gpu`` is required. ``--max-price`` and
     ``--gpu-num`` only narrow the search; they do not select a target on their
     own. Exactly one of ``--image`` and ``--private-image`` must be set. The
-    command blocks until the ordered instance is running or ``--timeout``
-    expires. Transient API errors while polling are retried ``--retry`` times
-    consecutively; authentication errors are never retried and ``0`` disables
-    retries. A machine whose order is rejected is skipped for an exponentially
-    growing cooldown, so the next matching machine is tried instead.
+    command blocks until the ordered instances are running or ``--timeout``
+    expires. ``--parallel`` tries several ranked machines per poll, and
+    ``--count`` keeps that many instances; any extra successful orders are
+    powered off and released immediately (cleanup is not bounded by
+    ``--timeout``). Transient API errors while polling are retried ``--retry``
+    times consecutively; authentication errors are never retried and ``0``
+    disables retries. A machine whose order is rejected is skipped for an
+    exponentially growing cooldown, so the next matching machine is tried
+    instead.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param regions: Region identifiers to search; empty means every region.
@@ -412,6 +459,8 @@ def snipe_command(
     :param gpu_num: Number of GPUs to request.
     :param max_price: Maximum pay-as-you-go price in yuan per hour.
     :param strategy: Machine ordering: ``price``, ``idle``, or ``first``.
+    :param parallel: Machines to try ordering concurrently each poll.
+    :param count: Number of instances to keep.
     :param base_image_uuid: Base-image UUID to boot from.
     :param private_image_uuid: Private-image UUID to boot from.
     :param name: Optional instance name.
@@ -443,6 +492,8 @@ def snipe_command(
                 gpu_amount=gpu_num,
                 max_price=max_price,
                 strategy=strategy,
+                parallel=parallel,
+                count=count,
                 base_image_uuid=base_image_uuid,
                 private_image_uuid=private_image_uuid,
                 instance_name=name,
@@ -459,11 +510,29 @@ def snipe_command(
         output.render_json(result)
         return
 
-    output.success(
-        f"Instance {result['instance_uuid']} is running on machine {result['machine_id']} "
-        f"in {result['region_name']} ({result['gpu_name']})."
-    )
-    output.info(f"Check its status with `autodl instance list -q {result['instance_uuid']}`.")
+    instances = result.get("instances")
+    records = [record for record in instances if isinstance(record, dict)] if isinstance(instances, list) else []
+    if not records:
+        records = [result]
+    for record in records:
+        output.success(
+            f"Instance {record['instance_uuid']} is running on machine {record['machine_id']} "
+            f"in {record['region_name']} ({record['gpu_name']})."
+        )
+    for record in records:
+        output.info(f"Check its status with `autodl instance list -q {record['instance_uuid']}`.")
+
+    released_instances = result.get("released_instances")
+    if isinstance(released_instances, list) and released_instances:
+        output.success(f"Released {len(released_instances)} surplus instance(s).")
+    release_failures = result.get("release_failures")
+    if isinstance(release_failures, list):
+        for failure in release_failures:
+            if isinstance(failure, dict):
+                output.warning(
+                    f"Could not release surplus instance {failure.get('instance_uuid', '')}: "
+                    f"{failure.get('error', '')}."
+                )
 
 
 def register_tools(main_group: click.Group) -> click.Group:

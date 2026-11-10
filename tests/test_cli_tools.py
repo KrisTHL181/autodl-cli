@@ -311,14 +311,16 @@ def _patch_snipe(
     *,
     events: bool = False,
     captured: dict[str, object] | None = None,
+    result_override: dict[str, object] | None = None,
 ) -> None:
     """Replace the snipe handler so the command never touches the network.
 
     :param monkeypatch: pytest's monkeypatch fixture.
     :param events: Whether the fake should emit progress events.
     :param captured: Optional mapping that receives the call arguments.
+    :param result_override: Optional result mapping replacing ``SNIPE_RESULT``.
     """
-    result = dict(SNIPE_RESULT)
+    result = dict(SNIPE_RESULT if result_override is None else result_override)
 
     def fake_snipe(client, **kwargs):
         if captured is not None:
@@ -351,6 +353,30 @@ def _patch_snipe(
             )
             on_event(
                 {
+                    "event": "ordered",
+                    "instance_uuid": "snipe-extra",
+                    "machine": machine,
+                    "extra": True,
+                }
+            )
+            on_event({"event": "releasing_extra", "instance_uuid": "snipe-extra", "machine": machine})
+            on_event(
+                {
+                    "event": "extra_power_off_failed",
+                    "instance_uuid": "snipe-extra",
+                    "error": "power off refused",
+                }
+            )
+            on_event({"event": "extra_released", "instance_uuid": "snipe-extra"})
+            on_event(
+                {
+                    "event": "extra_release_failed",
+                    "instance_uuid": "snipe-extra",
+                    "error": "release denied",
+                }
+            )
+            on_event(
+                {
                     "event": "instance_status",
                     "instance_uuid": result["instance_uuid"],
                     "status": "not found",
@@ -372,6 +398,7 @@ def _patch_snipe(
 def test_snipe_renders_progress_and_final_success(home: Path, monkeypatch) -> None:
     """Progress events become human-readable lines before the final summary."""
     _seed_token()
+    monkeypatch.setattr(tools_commands.output.console, "width", 200)
     captured: dict[str, object] = {}
     _patch_snipe(monkeypatch, events=True, captured=captured)
 
@@ -386,9 +413,14 @@ def test_snipe_renders_progress_and_final_success(home: Path, monkeypatch) -> No
     assert "Found RTX 3090 on machine m-1 (西北B区); ordering..." in result.output
     assert "Order failed on machine m-1: no capacity; backing off for 10s (failure #2)." in result.output
     assert "Ordered instance snipe-instance-1 on machine m-1; waiting for it to start..." in result.output
+    assert "Ordered surplus instance snipe-extra on machine m-1; powering off and releasing it..." in result.output
+    assert "Releasing surplus instance snipe-extra on machine m-1..." in result.output
+    assert "Could not power off surplus instance snipe-extra: power off refused; releasing it anyway." in result.output
+    assert "Released surplus instance snipe-extra." in result.output
+    assert "Could not release surplus instance snipe-extra: release denied." in result.output
     assert "Instance status: not visible yet." in result.output
     assert "Instance status: creating." in result.output
-    assert "Instance is running." in result.output
+    assert "Instance snipe-instance-1 is running." in result.output
     assert "Instance snipe-instance-1 is running on machine m-1" in result.output
     assert "autodl instance list -q snipe-instance-1" in result.output
 
@@ -427,6 +459,113 @@ def test_snipe_forwards_retry_to_the_handler(home: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert captured["retry"] == 3
+
+
+def test_snipe_forwards_parallel_and_count_to_the_handler(home: Path, monkeypatch) -> None:
+    """``--parallel`` and ``--count`` reach the handler unchanged."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--parallel",
+            "3",
+            "--count",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["parallel"] == 3
+    assert captured["count"] == 2
+
+
+@pytest.mark.parametrize("args", [["--parallel", "0"], ["--count", "0"]])
+def test_snipe_rejects_zero_parallel_or_count(home: Path, monkeypatch, args: list[str]) -> None:
+    """Zero is a usage error before the handler runs."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *call_args, **call_kwargs: pytest.fail("the handler must not run with invalid counts"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--image", "base-image-x", *args],
+    )
+
+    assert result.exit_code == 2
+    assert args[0] in result.output
+
+
+def test_snipe_renders_multiple_kept_and_released_instances(home: Path, monkeypatch) -> None:
+    """A multi-instance result prints one success line per kept instance and the release count."""
+    _seed_token()
+    monkeypatch.setattr(tools_commands.output.console, "width", 200)
+    first = dict(SNIPE_RESULT)
+    second = {**SNIPE_RESULT, "instance_uuid": "snipe-instance-2", "machine_id": "m-2"}
+    released = {**SNIPE_RESULT, "instance_uuid": "snipe-instance-3", "status": "released"}
+    result_override = {
+        **SNIPE_RESULT,
+        "instances": [first, second],
+        "released_instances": [released],
+        "release_failures": [],
+        "count": 2,
+        "parallel": 3,
+    }
+    _patch_snipe(monkeypatch, result_override=result_override)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--count",
+            "2",
+            "--parallel",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Instance snipe-instance-1 is running on machine m-1" in result.output
+    assert "Instance snipe-instance-2 is running on machine m-2" in result.output
+    assert result.output.count("autodl instance list -q") == 2
+    assert "Released 1 surplus instance(s)." in result.output
+
+
+def test_snipe_renders_release_failures(home: Path, monkeypatch) -> None:
+    """Release failures are reported as warnings after the kept instances."""
+    _seed_token()
+    monkeypatch.setattr(tools_commands.output.console, "width", 200)
+    result_override = {
+        **SNIPE_RESULT,
+        "instances": [dict(SNIPE_RESULT)],
+        "released_instances": [],
+        "release_failures": [{"instance_uuid": "snipe-extra", "error": "release denied"}],
+    }
+    _patch_snipe(monkeypatch, result_override=result_override)
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--gpu", "RTX 3090", "--image", "base-image-x"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Could not release surplus instance snipe-extra: release denied." in result.output
 
 
 def test_snipe_rejects_negative_retry(home: Path) -> None:
@@ -548,3 +687,5 @@ def test_snipe_help_lists_its_options(home: Path) -> None:
     assert "--gpu" in result.output
     assert "--max-price" in result.output
     assert "--strategy" in result.output
+    assert "--parallel" in result.output
+    assert "--count" in result.output

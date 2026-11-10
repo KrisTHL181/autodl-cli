@@ -1,16 +1,19 @@
-"""GPU-sniping handler: watch machine stock and order the first match.
+"""GPU-sniping handler: watch machine stock and order matching machines.
 
 :func:`select_machine` is a pure ranking function over the normalised machine
 records returned by :func:`autodl_cli.handlers.gpu.list_machines`.
-:func:`snipe` polls that listing, orders a candidate through
-:func:`autodl_cli.handlers.instance.create_instance`, and waits for the new
-instance to report ``running``. Progress is reported through an optional
-``on_event`` callback; handlers never write to the terminal.
+:func:`snipe` polls that listing and orders candidates through
+:func:`autodl_cli.handlers.instance.create_instance`, optionally trying several
+machines concurrently. It keeps the best-ranked successes, immediately powers
+off and releases any surplus orders, then waits for the kept instances to
+report ``running``. Progress is reported through an optional ``on_event``
+callback; handlers never write to the terminal.
 """
 
 from __future__ import annotations
 
 import time
+from concurrent import futures
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError, AuthError, AutoDLError
@@ -42,6 +45,9 @@ MAX_ORDER_BACKOFF_MULTIPLE = 8.0
 
 #: Instance statuses that mean the newly ordered instance will never start.
 FAILED_INSTANCE_STATUSES = frozenset({"failed", "error", "exception", "released"})
+
+#: How many times a surplus order is released before the failure is reported.
+EXTRA_RELEASE_ATTEMPTS = 3
 
 
 def _now() -> float:
@@ -293,6 +299,38 @@ def _call_with_retry(
             wait(interval)
 
 
+def _instance_record(
+    order: dict[str, object],
+    machine: dict[str, object],
+    status: str,
+) -> dict[str, object]:
+    """Build the flat per-instance record returned by :func:`snipe`.
+
+    :param order: Order mapping returned by
+        :func:`autodl_cli.handlers.instance.create_instance`.
+    :param machine: Machine record the order was placed on.
+    :param status: ``running`` for kept instances, ``released`` for surplus ones.
+    :returns: A flat mapping combining the order and machine fields.
+    """
+    return {
+        "instance_uuid": str(order["instance_uuid"]),
+        "machine_id": machine.get("machine_id"),
+        "machine_alias": machine.get("machine_alias"),
+        "region_name": machine.get("region_name"),
+        "region_sign": machine.get("region_sign"),
+        "gpu_name": machine.get("gpu_name"),
+        "gpu_idle_num": machine.get("gpu_idle_num"),
+        "payg_price": machine.get("payg_price"),
+        "gpu_amount": order.get("gpu_amount", 1),
+        "charge_type": order.get("charge_type", "payg"),
+        "base_image_uuid": order.get("base_image_uuid", ""),
+        "private_image_uuid": order.get("private_image_uuid", ""),
+        "instance_name": order.get("instance_name", ""),
+        "expand_data_disk": order.get("expand_data_disk", 0),
+        "status": status,
+    }
+
+
 def snipe(
     client: AutoDLClient,
     *,
@@ -301,6 +339,8 @@ def snipe(
     gpu_amount: int = 1,
     max_price: float | None = None,
     strategy: str = "price",
+    parallel: int = 1,
+    count: int = 1,
     base_image_uuid: str = "",
     private_image_uuid: str = "",
     instance_name: str = "",
@@ -310,11 +350,11 @@ def snipe(
     retry: int = 0,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
-    """Poll GPU stock until a machine matches, order it, and wait until running.
+    """Poll GPU stock, order up to ``parallel`` machines, and wait until running.
 
-    The call blocks until the instance reports ``running``, the timeout expires,
-    or the order is rejected in a way that must not be retried. Progress is
-    delivered through ``on_event``; handlers themselves never print.
+    The call blocks until ``count`` instances report ``running``, the timeout
+    expires, or an order is rejected in a way that must not be retried. Progress
+    is delivered through ``on_event``; handlers themselves never print.
 
     Region identifiers are resolved through :func:`autodl_cli.handlers.gpu.list_regions`
     and :func:`autodl_cli.handlers.gpu.select_regions` once, before polling. At
@@ -328,12 +368,20 @@ def snipe(
     :func:`_order_backoff`), so another matching machine is tried next and a
     persistently broken machine is not hammered every poll.
 
+    Each round orders up to ``parallel`` ranked machines concurrently. If more
+    orders succeed than are still needed for ``count``, the best-ranked
+    successes are kept and the surplus orders are powered off and released
+    immediately. Cleanup is not bounded by ``timeout``: the handler always
+    attempts to release every surplus order, even after the deadline.
+
     Events are mappings whose ``event`` key is ``poll``, ``poll_failed``,
-    ``found``, ``order_failed``, ``ordered``, ``instance_status``, or
-    ``running``. ``poll`` reports how many candidates are selectable
-    (``matches``) and how many are cooling down after a rejected order
-    (``cooling``); ``order_failed`` reports the machine's consecutive failure
-    count (``failures``) and the cooldown in seconds (``backoff``).
+    ``found``, ``order_failed``, ``ordered``, ``releasing_extra``,
+    ``extra_power_off_failed``, ``extra_released``, ``extra_release_failed``,
+    ``instance_status``, or ``running``. ``poll`` reports how many candidates
+    are selectable (``matches``) and how many are cooling down after a rejected
+    order (``cooling``); ``order_failed`` reports the machine's consecutive
+    failure count (``failures``) and the cooldown in seconds (``backoff``).
+    ``ordered`` carries ``extra: True`` for surplus orders.
 
     :param client: Authenticated API client.
     :param regions: Region signs, data centers, or display names to search.
@@ -341,25 +389,33 @@ def snipe(
     :param gpu_amount: Number of idle GPUs to request; must be at least 1.
     :param max_price: Maximum pay-as-you-go price in yuan per hour.
     :param strategy: Machine ordering: ``price``, ``idle``, or ``first``.
+    :param parallel: Machines to try ordering concurrently each round; must be
+        at least 1.
+    :param count: Instances to keep; surplus successes are released. Must be at
+        least 1.
     :param base_image_uuid: Base-image UUID; mutually exclusive with
         ``private_image_uuid``.
     :param private_image_uuid: Private-image UUID; mutually exclusive with
         ``base_image_uuid``.
-    :param instance_name: Optional name for the new instance.
+    :param instance_name: Optional name for the new instances.
     :param expand_data_disk: Extra data-disk size in GB.
     :param interval: Seconds between checks; must be positive.
     :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+        Surplus-order cleanup is not bounded by this value.
     :param retry: Consecutive transient polling errors to retry; ``0`` disables
         retries.
     :param on_event: Optional progress callback.
-    :returns: A flat mapping describing the ordered instance and the machine it
-        runs on.
+    :returns: A flat mapping describing the first kept instance, plus
+        ``instances`` (all kept instances in rank order),
+        ``released_instances`` (surplus instances that were released),
+        ``release_failures``, ``count``, ``parallel``, ``attempts``, and
+        ``elapsed_seconds``.
     :raises ValueError: When an argument is invalid or neither ``regions`` nor
         ``gpu_types`` is supplied, before any request is sent.
     :raises TimeoutError: When ``timeout`` expires without ordering or starting
-        an instance.
+        every kept instance.
     :raises autodl_cli.errors.AuthError: When the token is rejected.
-    :raises autodl_cli.errors.APIError: When the new instance enters a failed
+    :raises autodl_cli.errors.APIError: When a new instance enters a failed
         status.
     """
     if isinstance(gpu_amount, bool) or not isinstance(gpu_amount, int) or gpu_amount < 1:
@@ -367,6 +423,10 @@ def snipe(
     _validate_max_price(max_price)
     if strategy not in SNIPE_STRATEGIES:
         raise ValueError(f"strategy must be one of {', '.join(SNIPE_STRATEGIES)}")
+    if isinstance(parallel, bool) or not isinstance(parallel, int) or parallel < 1:
+        raise ValueError("parallel must be an integer of at least 1")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        raise ValueError("count must be an integer of at least 1")
     if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
         raise ValueError("interval must be a positive number")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
@@ -399,15 +459,16 @@ def snipe(
             region_sign_list.extend(gpu_handler.region_signs(region))
 
     attempt = 0
-    machine: dict[str, object] | None = None
-    order: dict[str, object] | None = None
-    instance_uuid = ""
+    kept: list[tuple[dict[str, object], dict[str, object]]] = []
+    released: list[dict[str, object]] = []
+    release_failures: list[dict[str, object]] = []
     order_failures: dict[str, int] = {}
     cooldowns: dict[str, float] = {}
+    order_timeout_reason = "without ordering an instance" if count == 1 else f"without ordering {count} instances"
 
-    while True:
+    while len(kept) < count:
         attempt += 1
-        _raise_if_timed_out(deadline, timeout=timeout, reason="without ordering an instance")
+        _raise_if_timed_out(deadline, timeout=timeout, reason=order_timeout_reason)
 
         page = _call_with_retry(
             lambda: gpu_handler.list_machines(
@@ -423,7 +484,7 @@ def snipe(
             deadline=deadline,
             timeout=timeout,
             on_event=on_event,
-            timeout_reason="without ordering an instance",
+            timeout_reason=order_timeout_reason,
         )
         entries = page.get("machines")
         candidates = _filter_and_sort(
@@ -446,119 +507,220 @@ def snipe(
         )
 
         if not ready:
-            _raise_if_timed_out(deadline, timeout=timeout, reason="without ordering an instance")
+            _raise_if_timed_out(deadline, timeout=timeout, reason=order_timeout_reason)
             wait(interval)
             continue
 
-        machine = ready[0]
-        _emit(on_event, {"event": "found", "machine": machine})
-        try:
-            order = instance_handler.create_instance(
+        to_try = ready[:parallel]
+        for candidate in to_try:
+            _emit(on_event, {"event": "found", "machine": candidate})
+
+        def place_order(target: dict[str, object]) -> dict[str, object]:
+            return instance_handler.create_instance(
                 client,
-                machine_id=str(machine["machine_id"]),
+                machine_id=str(target["machine_id"]),
                 base_image_uuid=base_image,
                 private_image_uuid=private_image,
                 gpu_amount=gpu_amount,
                 instance_name=instance_name,
                 expand_data_disk=expand_data_disk,
             )
-        except AuthError:
-            raise
-        except AutoDLError as exc:
-            machine_key = _machine_id_key(machine)
-            failures = order_failures.get(machine_key, 0) + 1
-            order_failures[machine_key] = failures
-            backoff = _order_backoff(interval, failures)
-            cooldowns[machine_key] = _now() + backoff
-            _emit(
-                on_event,
-                {
-                    "event": "order_failed",
-                    "machine_id": machine.get("machine_id"),
-                    "error": str(exc),
-                    "failures": failures,
-                    "backoff": round(backoff, 1),
-                },
-            )
-            _raise_if_timed_out(deadline, timeout=timeout, reason="without ordering an instance")
+
+        outcomes: dict[int, dict[str, object] | AutoDLError] = {}
+        with futures.ThreadPoolExecutor(max_workers=len(to_try)) as executor:
+            pending_orders = {executor.submit(place_order, candidate): index for index, candidate in enumerate(to_try)}
+            for future in futures.as_completed(pending_orders):
+                index = pending_orders[future]
+                try:
+                    outcomes[index] = future.result()
+                except AutoDLError as exc:
+                    outcomes[index] = exc
+
+        # Authentication failures abort the whole run, but only after every
+        # concurrent order has finished.
+        for index in range(len(to_try)):
+            outcome = outcomes.get(index)
+            if isinstance(outcome, AuthError):
+                raise outcome
+
+        succeeded: list[tuple[dict[str, object], dict[str, object]]] = []
+        for index, candidate in enumerate(to_try):
+            outcome = outcomes.get(index)
+            if isinstance(outcome, AutoDLError):
+                machine_key = _machine_id_key(candidate)
+                failures = order_failures.get(machine_key, 0) + 1
+                order_failures[machine_key] = failures
+                backoff = _order_backoff(interval, failures)
+                cooldowns[machine_key] = _now() + backoff
+                _emit(
+                    on_event,
+                    {
+                        "event": "order_failed",
+                        "machine_id": candidate.get("machine_id"),
+                        "error": str(outcome),
+                        "failures": failures,
+                        "backoff": round(backoff, 1),
+                    },
+                )
+                continue
+            if isinstance(outcome, dict):
+                succeeded.append((outcome, candidate))
+
+        if not succeeded:
+            _raise_if_timed_out(deadline, timeout=timeout, reason=order_timeout_reason)
             continue
 
-        instance_uuid = str(order["instance_uuid"])
-        _emit(
-            on_event,
-            {
-                "event": "ordered",
-                "instance_uuid": instance_uuid,
-                "machine": machine,
-            },
-        )
-        break
+        needed = count - len(kept)
+        keep_count = min(needed, len(succeeded))
+        keep = succeeded[:keep_count]
+        extras = succeeded[keep_count:]
 
-    if machine is None or order is None:  # Pragmatic guard; the loop cannot reach this.
-        raise APIError("AutoDL snipe finished without ordering an instance")
-
-    last_status: str | None = None
-    while True:
-        last_label = last_status if last_status is not None else "not found"
-        timeout_reason = f"waiting for instance {instance_uuid} to start (last status: {last_label!r})"
-        listed = _call_with_retry(
-            lambda: instance_handler.list_instances(client, query=instance_uuid),
-            retry=retry,
-            interval=interval,
-            deadline=deadline,
-            timeout=timeout,
-            on_event=on_event,
-            timeout_reason=timeout_reason,
-        )
-        entry = next(
-            (
-                candidate
-                for candidate in listed
-                if isinstance(candidate, dict) and candidate.get("uuid") == instance_uuid
-            ),
-            None,
-        )
-        status = _instance_status(entry)
-        if status != last_status:
+        for order, candidate in keep:
             _emit(
                 on_event,
                 {
-                    "event": "instance_status",
-                    "instance_uuid": instance_uuid,
-                    "status": status,
+                    "event": "ordered",
+                    "instance_uuid": str(order["instance_uuid"]),
+                    "machine": candidate,
                 },
             )
-            last_status = status
+            kept.append((order, candidate))
 
-        if status.casefold() == "running":
-            _emit(on_event, {"event": "running", "instance_uuid": instance_uuid})
+        for order, candidate in extras:
+            extra_uuid = str(order["instance_uuid"])
+            _emit(
+                on_event,
+                {
+                    "event": "ordered",
+                    "instance_uuid": extra_uuid,
+                    "machine": candidate,
+                    "extra": True,
+                },
+            )
+            _emit(
+                on_event,
+                {
+                    "event": "releasing_extra",
+                    "instance_uuid": extra_uuid,
+                    "machine": candidate,
+                },
+            )
+            try:
+                instance_handler.power_off(client, extra_uuid)
+            except AuthError:
+                raise
+            except AutoDLError as exc:
+                _emit(
+                    on_event,
+                    {
+                        "event": "extra_power_off_failed",
+                        "instance_uuid": extra_uuid,
+                        "error": str(exc),
+                    },
+                )
+
+            release_error: AutoDLError | None = None
+            for release_attempt in range(EXTRA_RELEASE_ATTEMPTS):
+                try:
+                    instance_handler.release_instance(client, extra_uuid)
+                except AuthError:
+                    raise
+                except AutoDLError as exc:
+                    release_error = exc
+                    if release_attempt + 1 < EXTRA_RELEASE_ATTEMPTS:
+                        wait(interval)
+                    continue
+                release_error = None
+                break
+
+            if release_error is None:
+                _emit(
+                    on_event,
+                    {
+                        "event": "extra_released",
+                        "instance_uuid": extra_uuid,
+                        "machine": candidate,
+                    },
+                )
+                released.append(_instance_record(order, candidate, "released"))
+            else:
+                _emit(
+                    on_event,
+                    {
+                        "event": "extra_release_failed",
+                        "instance_uuid": extra_uuid,
+                        "error": str(release_error),
+                    },
+                )
+                release_failures.append({"instance_uuid": extra_uuid, "error": str(release_error)})
+
+        if len(kept) >= count:
             break
-        if status.casefold() in FAILED_INSTANCE_STATUSES:
-            raise APIError(f"Instance {instance_uuid} entered status {status!r} while starting")
 
-        _raise_if_timed_out(
-            deadline,
-            timeout=timeout,
-            reason=f"waiting for instance {instance_uuid} to start (last status: {status!r})",
-        )
+    last_statuses: dict[str, str | None] = {str(order["instance_uuid"]): None for order, _ in kept}
+    pending: list[str] = list(last_statuses)
+    while pending:
+        still_pending: list[str] = []
+        for pending_uuid in pending:
+            last_status = last_statuses[pending_uuid]
+            last_label = last_status if last_status is not None else "not found"
+            retry_reason = f"waiting for instance {pending_uuid} to start (last status: {last_label!r})"
+            listed = _call_with_retry(
+                lambda pending_uuid=pending_uuid: instance_handler.list_instances(client, query=pending_uuid),
+                retry=retry,
+                interval=interval,
+                deadline=deadline,
+                timeout=timeout,
+                on_event=on_event,
+                timeout_reason=retry_reason,
+            )
+            entry = next(
+                (
+                    candidate
+                    for candidate in listed
+                    if isinstance(candidate, dict) and candidate.get("uuid") == pending_uuid
+                ),
+                None,
+            )
+            status = _instance_status(entry)
+            if status != last_status:
+                _emit(
+                    on_event,
+                    {
+                        "event": "instance_status",
+                        "instance_uuid": pending_uuid,
+                        "status": status,
+                    },
+                )
+                last_statuses[pending_uuid] = status
+
+            if status.casefold() == "running":
+                _emit(on_event, {"event": "running", "instance_uuid": pending_uuid})
+                continue
+            if status.casefold() in FAILED_INSTANCE_STATUSES:
+                raise APIError(f"Instance {pending_uuid} entered status {status!r} while starting")
+            still_pending.append(pending_uuid)
+
+        pending = still_pending
+        if not pending:
+            break
+        if len(pending) == 1:
+            only_uuid = pending[0]
+            timeout_reason = f"waiting for instance {only_uuid} to start (last status: {last_statuses[only_uuid]!r})"
+        else:
+            timeout_reason = (
+                f"waiting for instances {', '.join(pending)} to start (last status: {last_statuses[pending[0]]!r})"
+            )
+        _raise_if_timed_out(deadline, timeout=timeout, reason=timeout_reason)
         wait(interval)
 
-    return {
-        "instance_uuid": instance_uuid,
-        "machine_id": machine.get("machine_id"),
-        "machine_alias": machine.get("machine_alias"),
-        "region_name": machine.get("region_name"),
-        "region_sign": machine.get("region_sign"),
-        "gpu_name": machine.get("gpu_name"),
-        "gpu_idle_num": machine.get("gpu_idle_num"),
-        "payg_price": machine.get("payg_price"),
-        "gpu_amount": order.get("gpu_amount", gpu_amount),
-        "charge_type": order.get("charge_type", "payg"),
-        "base_image_uuid": order.get("base_image_uuid", base_image),
-        "private_image_uuid": order.get("private_image_uuid", private_image),
-        "instance_name": order.get("instance_name", instance_name),
-        "expand_data_disk": order.get("expand_data_disk", expand_data_disk),
-        "status": "running",
-        "attempts": attempt,
-        "elapsed_seconds": round(_now() - started, 1),
-    }
+    instance_records = [_instance_record(order, machine, "running") for order, machine in kept]
+    result = dict(instance_records[0])
+    result["instances"] = instance_records
+    result["released_instances"] = released
+    result["release_failures"] = release_failures
+    result["count"] = count
+    result["parallel"] = parallel
+    result["attempts"] = attempt
+    result["elapsed_seconds"] = round(_now() - started, 1)
+    return result
