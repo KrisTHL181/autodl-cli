@@ -179,6 +179,7 @@ autodl instance list --status running -q 4090
 autodl instance list --unbind-sub-user
 autodl instance detail <instance-uuid>
 autodl instance power-on <instance-uuid>
+autodl instance power-on <instance-uuid> --non-gpu
 autodl instance power-off <instance-uuid>
 autodl instance release <instance-uuid>
 autodl instance release <instance-uuid> --yes
@@ -191,7 +192,9 @@ autodl instance create --machine-id 1c0641804d --private-image image-abcd1234 \
 ```
 
 `power-on` posts to `/api/v1/instance/power_on`; AutoDL accepts the request
-immediately, and the instance may take a moment to show as running. `power-off`
+immediately, and the instance may take a moment to show as running. Pass
+`--non-gpu` to start it in CPU-only mode, which boots without its GPU cards and
+shows as `CPU` in `instance list`. `power-off`
 posts to `/api/v1/instance/power_off` and keeps the data disk; AutoDL releases
 a powered-off instance after the retention window shown by `instance list`
 unless it is powered on again. `release` posts to

@@ -16,8 +16,10 @@ Saving an instance as a custom image posts to
 a small record of what it requested.
 
 Powering an instance on posts to ``POST /api/v1/instance/power_on`` with the
-same ``{"instance_uuid": ...}`` body. It answers with ``"data": null`` too, so
-:func:`power_on` validates the envelope only and returns the matching record.
+same ``{"instance_uuid": ...}`` body. Passing ``non_gpu=True`` adds
+``"payload": "non_gpu"``, the console's CPU-only (no-GPU) start mode. It answers
+with ``"data": null`` too, so :func:`power_on` validates the envelope only and
+returns the matching record.
 
 Powering an instance off posts to ``POST /api/v1/instance/power_off`` with the
 instance UUID in the body. It answers with ``"data": null`` as well, so
@@ -63,6 +65,9 @@ INSTANCE_IMAGE_SAVE_PATH = "/api/v1/instance/image/save"
 
 #: Path of the power-on endpoint.
 INSTANCE_POWER_ON_PATH = "/api/v1/instance/power_on"
+
+#: Power-on payload that starts the instance in CPU-only (no-GPU) mode.
+POWER_ON_NON_GPU_PAYLOAD = "non_gpu"
 
 #: Path of the power-off endpoint.
 INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
@@ -433,16 +438,20 @@ def select_machine(
     raise APIError(f"No machine with {gpu_amount} idle {gpu!r} GPU(s) in region {region!r}")
 
 
-def power_on(client: AutoDLClient, instance_id: str) -> dict[str, object]:
-    """Power an instance on.
+def power_on(client: AutoDLClient, instance_id: str, *, non_gpu: bool = False) -> dict[str, object]:
+    """Power an instance on, optionally in CPU-only mode.
 
     ``POST /api/v1/instance/power_on`` answers with ``"data": null`` on
     success, so success is signalled by the envelope's ``code`` alone. The
     request is accepted immediately; the instance may take a moment to start.
 
+    When ``non_gpu`` is true the body carries ``"payload": "non_gpu"``, which is
+    the web console's no-GPU start mode: the instance boots without its cards.
+
     :param client: Authenticated API client.
     :param instance_id: Instance UUID from :func:`list_instances`.
-    :returns: A mapping with ``instance_uuid`` and ``powered_on``.
+    :param non_gpu: Start the instance in CPU-only (no-GPU) mode.
+    :returns: A mapping with ``instance_uuid``, ``powered_on``, and ``non_gpu``.
     :raises ValueError: When ``instance_id`` is blank.
     :raises autodl_cli.errors.AuthError: When the token is rejected.
     :raises autodl_cli.errors.APIError: When the API reports a failure.
@@ -452,12 +461,15 @@ def power_on(client: AutoDLClient, instance_id: str) -> dict[str, object]:
         raise ValueError("instance_id must not be empty")
 
     body: dict[str, object] = {"instance_uuid": instance_uuid}
+    if non_gpu:
+        body["payload"] = POWER_ON_NON_GPU_PAYLOAD
     payload = client.request("POST", INSTANCE_POWER_ON_PATH, json=body)
     require_success_any(payload, action="power on instance")
 
     return {
         "instance_uuid": instance_uuid,
         "powered_on": True,
+        "non_gpu": non_gpu,
     }
 
 

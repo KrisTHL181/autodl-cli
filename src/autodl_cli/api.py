@@ -262,20 +262,22 @@ def create_instance(
         )
 
 
-def power_on(token: str, instance_uuid: str) -> dict[str, object]:
-    """Power an instance on.
+def power_on(token: str, instance_uuid: str, *, non_gpu: bool = False) -> dict[str, object]:
+    """Power an instance on, optionally in CPU-only mode.
 
     AutoDL accepts the request immediately and answers with a null ``data``
-    payload; the instance may take a moment to start.
+    payload; the instance may take a moment to start. With ``non_gpu`` the
+    instance boots without its GPUs, as the web console's no-GPU mode does.
 
     :param token: AutoDL API token, typically copied from a browser session.
     :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
-    :returns: A mapping with ``instance_uuid`` and ``powered_on``.
+    :param non_gpu: Start the instance in CPU-only (no-GPU) mode.
+    :returns: A mapping with ``instance_uuid``, ``powered_on``, and ``non_gpu``.
     :raises autodl_cli.errors.AutoDLError: For every authentication or API
         failure.
     """
     with AutoDLClient(token) as client:
-        return instance_handler.power_on(client, instance_uuid)
+        return instance_handler.power_on(client, instance_uuid, non_gpu=non_gpu)
 
 
 def power_off(token: str, instance_uuid: str) -> dict[str, object]:

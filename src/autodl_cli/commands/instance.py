@@ -8,7 +8,8 @@ pay-as-you-go order body to ``POST /api/v1/order/instance/create/payg`` and
 can resolve a machine from ``--region``/``--gpu`` first. ``power-on`` and
 ``power-off`` post to
 ``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
-which report success with a null ``data`` payload. ``release`` posts to
+which report success with a null ``data`` payload; ``power-on --non-gpu``
+starts the instance in CPU-only mode. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
 the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
@@ -142,15 +143,22 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
 
 @instance.command("power-on", help="Power an instance on.")
 @click.argument("instance_uuid")
+@click.option(
+    "--non-gpu",
+    is_flag=True,
+    help="Start the instance in CPU-only (no-GPU) mode.",
+)
 @click.pass_context
-def power_on_command(ctx: click.Context, instance_uuid: str) -> None:
-    """Power an instance on.
+def power_on_command(ctx: click.Context, instance_uuid: str, non_gpu: bool) -> None:
+    """Power an instance on, optionally in CPU-only mode.
 
     AutoDL accepts the request immediately; the instance may take a moment to
-    start before it appears as running in ``instance list``.
+    start before it appears as running in ``instance list``. With ``--non-gpu``
+    the instance boots without its GPUs, as the web console's no-GPU mode does.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param non_gpu: Start the instance in CPU-only (no-GPU) mode.
     :raises click.ClickException: When the argument is blank, no token is
         configured, or the API call fails.
     """
@@ -159,7 +167,7 @@ def power_on_command(ctx: click.Context, instance_uuid: str) -> None:
 
     try:
         with build_client(token, config) as client:
-            result = instance_handler.power_on(client, instance_uuid)
+            result = instance_handler.power_on(client, instance_uuid, non_gpu=non_gpu)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     except AutoDLError as exc:
@@ -169,7 +177,8 @@ def power_on_command(ctx: click.Context, instance_uuid: str) -> None:
         output.render_json(result)
         return
 
-    output.success(f"Power-on requested for instance {result['instance_uuid']}.")
+    mode = " in CPU-only mode" if non_gpu else ""
+    output.success(f"Power-on requested for instance {result['instance_uuid']}{mode}.")
 
 
 @instance.command("power-off", help="Power an instance off.")

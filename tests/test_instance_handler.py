@@ -570,6 +570,26 @@ def test_power_on_posts_expected_body_and_tolerates_null_data() -> None:
     assert result == {
         "instance_uuid": POWER_ON_INSTANCE_UUID,
         "powered_on": True,
+        "non_gpu": False,
+    }
+
+
+def test_power_on_non_gpu_sends_the_no_gpu_payload() -> None:
+    """``non_gpu=True`` adds the console's CPU-only start payload."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.power_on(client, POWER_ON_INSTANCE_UUID, non_gpu=True)
+
+    assert seen["body"] == {"instance_uuid": POWER_ON_INSTANCE_UUID, "payload": "non_gpu"}
+    assert result == {
+        "instance_uuid": POWER_ON_INSTANCE_UUID,
+        "powered_on": True,
+        "non_gpu": True,
     }
 
 

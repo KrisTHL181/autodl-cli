@@ -690,10 +690,11 @@ def test_power_on_forwards_instance_and_returns_json(home: Path, monkeypatch) ->
     """The positional UUID reaches the handler; JSON is passed through."""
     _seed_token()
     captured: dict[str, object] = {}
-    record = {"instance_uuid": INSTANCE_UUID, "powered_on": True}
+    record = {"instance_uuid": INSTANCE_UUID, "powered_on": True, "non_gpu": False}
 
-    def fake_power_on(client, instance_id):
+    def fake_power_on(client, instance_id, *, non_gpu=False):
         captured["instance_id"] = instance_id
+        captured["non_gpu"] = non_gpu
         return record
 
     monkeypatch.setattr(instance_commands.instance_handler, "power_on", fake_power_on)
@@ -701,8 +702,28 @@ def test_power_on_forwards_instance_and_returns_json(home: Path, monkeypatch) ->
     result = CliRunner().invoke(main, ["--json", "instance", "power-on", INSTANCE_UUID])
 
     assert result.exit_code == 0, result.output
-    assert captured == {"instance_id": INSTANCE_UUID}
+    assert captured == {"instance_id": INSTANCE_UUID, "non_gpu": False}
     assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_power_on_non_gpu_flag_reaches_the_handler(home: Path, monkeypatch) -> None:
+    """``--non-gpu`` is forwarded and the human view names the mode."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_power_on(client, instance_id, *, non_gpu=False):
+        captured["instance_id"] = instance_id
+        captured["non_gpu"] = non_gpu
+        return {"instance_uuid": instance_id, "powered_on": True, "non_gpu": non_gpu}
+
+    monkeypatch.setattr(instance_commands.instance_handler, "power_on", fake_power_on)
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID, "--non-gpu"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID, "non_gpu": True}
+    assert f"Power-on requested for instance {INSTANCE_UUID} in CPU-only mode." in result.output
     assert TOKEN not in result.output
 
 
@@ -712,7 +733,11 @@ def test_power_on_human_output_reports_success(home: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         instance_commands.instance_handler,
         "power_on",
-        lambda client, instance_id: {"instance_uuid": instance_id, "powered_on": True},
+        lambda client, instance_id, *, non_gpu=False: {
+            "instance_uuid": instance_id,
+            "powered_on": True,
+            "non_gpu": non_gpu,
+        },
     )
 
     result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID])
@@ -726,7 +751,7 @@ def test_power_on_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> No
     """A blank UUID rejected by the handler exits 1 without a traceback."""
     _seed_token()
 
-    def failing_power_on(client, instance_id):
+    def failing_power_on(client, instance_id, *, non_gpu=False):
         raise ValueError("instance_id must not be empty")
 
     monkeypatch.setattr(instance_commands.instance_handler, "power_on", failing_power_on)
@@ -757,7 +782,7 @@ def test_power_on_api_failure_is_a_clean_click_exception(home: Path, monkeypatch
     """An API failure exits 1 without a traceback."""
     _seed_token()
 
-    def failing_power_on(client, instance_id):
+    def failing_power_on(client, instance_id, *, non_gpu=False):
         raise AuthError("token expired")
 
     monkeypatch.setattr(instance_commands.instance_handler, "power_on", failing_power_on)
