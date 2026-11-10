@@ -76,6 +76,7 @@ INSTANCES = [
 
 
 INSTANCE_UUID = "9b384da211-e57974ef"
+IMAGE_UUID = "base-image-ec1e9vdbd3"
 
 DETAIL = {
     "image_type": "",
@@ -797,6 +798,139 @@ def test_reset_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -
     monkeypatch.setattr(instance_commands.instance_handler, "reset_instance", failing_reset_instance)
 
     result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID, "--yes"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_change_image_forwards_arguments_and_returns_json(home: Path, monkeypatch) -> None:
+    """``--yes`` skips the prompt, forwards both UUIDs, and emits the result."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {
+        "instance_uuid": INSTANCE_UUID,
+        "base_image_uuid": IMAGE_UUID,
+        "image_changed": True,
+    }
+
+    def fake_change_image(client, instance_id, base_image_uuid):
+        captured["instance_id"] = instance_id
+        captured["base_image_uuid"] = base_image_uuid
+        return record
+
+    monkeypatch.setattr(instance_commands.instance_handler, "change_image", fake_change_image)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "instance", "change-image", INSTANCE_UUID, IMAGE_UUID, "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID, "base_image_uuid": IMAGE_UUID}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_change_image_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms the instance and the new image."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "change_image",
+        lambda client, instance_id, base_image_uuid: {
+            "instance_uuid": instance_id,
+            "base_image_uuid": base_image_uuid,
+            "image_changed": True,
+        },
+    )
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Image change requested for {INSTANCE_UUID}: {IMAGE_UUID}." in result.output
+    assert TOKEN not in result.output
+
+
+def test_change_image_prompts_and_accepts(home: Path, monkeypatch) -> None:
+    """Without ``--yes`` the command asks, then changes the image when confirmed."""
+    _seed_token()
+    called: list[tuple[str, str]] = []
+
+    def fake_change_image(client, instance_id, base_image_uuid):
+        called.append((instance_id, base_image_uuid))
+        return {
+            "instance_uuid": instance_id,
+            "base_image_uuid": base_image_uuid,
+            "image_changed": True,
+        }
+
+    monkeypatch.setattr(instance_commands.instance_handler, "change_image", fake_change_image)
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert f"Change the image of instance {INSTANCE_UUID} to {IMAGE_UUID}?" in result.output
+    assert called == [(INSTANCE_UUID, IMAGE_UUID)]
+
+
+def test_change_image_prompt_can_abort(home: Path, monkeypatch) -> None:
+    """Declining the prompt aborts without calling the handler."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "change_image",
+        lambda *args, **kwargs: pytest.fail("the handler must not run when the prompt is declined"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_change_image_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> None:
+    """A blank base-image UUID rejected by the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_change_image(client, instance_id, base_image_uuid):
+        raise ValueError("base_image_uuid must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "change_image", failing_change_image)
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, " ", "--yes"])
+
+    assert result.exit_code == 1
+    assert "base_image_uuid must not be empty" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_change_image_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "change_image",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID, "--yes"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_change_image_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_change_image(client, instance_id, base_image_uuid):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "change_image", failing_change_image)
+
+    result = CliRunner().invoke(main, ["instance", "change-image", INSTANCE_UUID, IMAGE_UUID, "--yes"])
 
     assert result.exit_code == 1
     assert "token expired" in result.output

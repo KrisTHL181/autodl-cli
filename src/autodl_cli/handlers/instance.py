@@ -36,6 +36,11 @@ Resetting an instance posts to ``POST /api/v1/instance/init`` with the same
 ``{"instance_uuid": ...}`` body and answers with ``"data": null``. It rebuilds
 the system disk from the instance's image while keeping the data disk.
 
+Changing an instance's image posts to ``POST /api/v1/instance/change_image``
+with the instance UUID and the new base-image UUID, and answers with
+``"data": null``. It rebuilds the system disk from that image while keeping the
+data disk.
+
 Creating a pay-as-you-go instance posts the web console's order body to
 ``POST /api/v1/order/instance/create/payg``. Its ``data`` field is the new
 instance UUID string rather than an object, so :func:`create_instance` unwraps
@@ -81,6 +86,9 @@ INSTANCE_RELEASE_PATH = "/api/v1/instance/release"
 
 #: Path of the reset endpoint.
 INSTANCE_RESET_PATH = "/api/v1/instance/init"
+
+#: Path of the change-image endpoint.
+INSTANCE_CHANGE_IMAGE_PATH = "/api/v1/instance/change_image"
 
 #: Path of the pay-as-you-go instance-create endpoint.
 INSTANCE_CREATE_PATH = "/api/v1/order/instance/create/payg"
@@ -534,6 +542,44 @@ def reset_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     return {
         "instance_uuid": instance_uuid,
         "reset": True,
+    }
+
+
+def change_image(client: AutoDLClient, instance_id: str, base_image_uuid: str) -> dict[str, object]:
+    """Change an instance's image, rebuilding its system disk.
+
+    ``POST /api/v1/instance/change_image`` answers with ``"data": null`` on
+    success, so success is signalled by the envelope's ``code`` alone. The
+    system disk is rebuilt from the chosen base image; the data disk is
+    preserved.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :param base_image_uuid: Base-image UUID from :func:`list_images`.
+    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``, and
+        ``image_changed``.
+    :raises ValueError: When ``instance_id`` or ``base_image_uuid`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    instance_uuid = instance_id.strip()
+    image_uuid = base_image_uuid.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+    if not image_uuid:
+        raise ValueError("base_image_uuid must not be empty")
+
+    body: dict[str, object] = {
+        "instance_uuid": instance_uuid,
+        "base_image_uuid": image_uuid,
+    }
+    payload = client.request("POST", INSTANCE_CHANGE_IMAGE_PATH, json=body)
+    require_success_any(payload, action="change instance image")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "base_image_uuid": image_uuid,
+        "image_changed": True,
     }
 
 

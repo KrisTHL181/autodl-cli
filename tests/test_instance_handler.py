@@ -606,6 +606,87 @@ def test_reset_instance_failure_raises_api_error() -> None:
             instance_handler.reset_instance(client, RESET_INSTANCE_UUID)
 
 
+CHANGE_IMAGE_INSTANCE_UUID = "ch5mk72pqr-8c31f0d4"
+CHANGE_IMAGE_UUID = "base-image-ec1e9vdbd3"
+
+
+def test_change_image_posts_expected_body_and_tolerates_null_data() -> None:
+    """The handler trims both UUIDs, POSTs the console body, and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.change_image(
+            client,
+            f" {CHANGE_IMAGE_INSTANCE_UUID} ",
+            f" {CHANGE_IMAGE_UUID} ",
+        )
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/instance/change_image",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {
+            "instance_uuid": CHANGE_IMAGE_INSTANCE_UUID,
+            "base_image_uuid": CHANGE_IMAGE_UUID,
+        },
+    }
+    assert result == {
+        "instance_uuid": CHANGE_IMAGE_INSTANCE_UUID,
+        "base_image_uuid": CHANGE_IMAGE_UUID,
+        "image_changed": True,
+    }
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_change_image_rejects_blank_instance_id(instance_id: str) -> None:
+    """A blank instance UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_id must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.change_image(client, instance_id, CHANGE_IMAGE_UUID)
+
+
+@pytest.mark.parametrize("image_uuid", ["", "   "])
+def test_change_image_rejects_blank_image_uuid(image_uuid: str) -> None:
+    """A blank base-image UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="base_image_uuid must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.change_image(client, CHANGE_IMAGE_INSTANCE_UUID, image_uuid)
+
+
+def test_change_image_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-12"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.change_image(client, CHANGE_IMAGE_INSTANCE_UUID, CHANGE_IMAGE_UUID)
+
+
+def test_change_image_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "InstanceNotShutdown", "msg": "power off first", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="power off first"):
+            instance_handler.change_image(client, CHANGE_IMAGE_INSTANCE_UUID, CHANGE_IMAGE_UUID)
+
+
 POWER_ON_INSTANCE_UUID = "on7kf92mzu-4a18b0c3"
 
 

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AutoDLClient",
+    "change_image",
     "create_instance",
     "delete_private_image",
     "get_balance",
@@ -329,6 +330,25 @@ def reset_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.reset_instance(client, instance_uuid)
+
+
+def change_image(token: str, instance_uuid: str, base_image_uuid: str) -> dict[str, object]:
+    """Change an instance's image, rebuilding its system disk.
+
+    AutoDL accepts the request immediately and answers with a null ``data``
+    payload. The system disk is rebuilt from the new base image; the data disk
+    is preserved.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :param base_image_uuid: Base-image UUID as returned by :func:`list_images`.
+    :returns: A mapping with ``instance_uuid``, ``base_image_uuid``, and
+        ``image_changed``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.change_image(client, instance_uuid, base_image_uuid)
 
 
 def save_image(

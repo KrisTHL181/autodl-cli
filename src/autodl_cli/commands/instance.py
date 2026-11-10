@@ -11,7 +11,9 @@ can resolve a machine from ``--region``/``--gpu`` first. ``power-on`` and
 which report success with a null ``data`` payload; ``power-on --non-gpu``
 starts the instance in CPU-only mode. ``reset`` posts to
 ``POST /api/v1/instance/init``, rebuilding the system disk while keeping the
-data disk, and asks for confirmation. ``release`` posts to
+data disk, and asks for confirmation. ``change-image`` posts to
+``POST /api/v1/instance/change_image`` to rebuild the system disk from another
+base image, and asks for confirmation too. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
 the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
@@ -254,6 +256,54 @@ def reset_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
         return
 
     output.success(f"Reset requested for instance {result['instance_uuid']}.")
+
+
+@instance.command("change-image", help="Change an instance's image, rebuilding its system disk.")
+@click.argument("instance_uuid")
+@click.argument("base_image_uuid")
+@click.option("--yes", "-y", is_flag=True, help="Change the image without asking for confirmation.")
+@click.pass_context
+def change_image_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    base_image_uuid: str,
+    yes: bool,
+) -> None:
+    """Change an instance's image, rebuilding its system disk.
+
+    The system disk is rebuilt from the new base image, so changes made outside
+    the data disk are lost; the data disk itself is kept. The command asks for
+    confirmation unless ``--yes`` is passed; use ``--yes`` in scripts.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param base_image_uuid: Base-image UUID as printed by ``image list``.
+    :param yes: Whether to skip the confirmation prompt.
+    :raises click.ClickException: When an argument is blank, no token is
+        configured, or the API call fails.
+    :raises click.Abort: When the user declines the confirmation prompt.
+    """
+    config = load_config()
+    token = require_token(config)
+    if not yes:
+        click.confirm(
+            f"Change the image of instance {instance_uuid} to {base_image_uuid}? This rebuilds its system disk.",
+            abort=True,
+        )
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.change_image(client, instance_uuid, base_image_uuid)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Image change requested for {result['instance_uuid']}: {result['base_image_uuid']}.")
 
 
 @instance.command("release", help="Release an instance, deleting it and its data disk.")
