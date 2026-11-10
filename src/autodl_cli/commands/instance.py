@@ -9,7 +9,9 @@ can resolve a machine from ``--region``/``--gpu`` first. ``power-on`` and
 ``power-off`` post to
 ``POST /api/v1/instance/power_on`` and ``POST /api/v1/instance/power_off``,
 which report success with a null ``data`` payload; ``power-on --non-gpu``
-starts the instance in CPU-only mode. ``release`` posts to
+starts the instance in CPU-only mode. ``reset`` posts to
+``POST /api/v1/instance/init``, rebuilding the system disk while keeping the
+data disk, and asks for confirmation. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
 the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
@@ -211,6 +213,47 @@ def power_off_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.success(f"Power-off requested for instance {result['instance_uuid']}.")
+
+
+@instance.command("reset", help="Reset an instance, rebuilding its system disk.")
+@click.argument("instance_uuid")
+@click.option("--yes", "-y", is_flag=True, help="Reset without asking for confirmation.")
+@click.pass_context
+def reset_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
+    """Reset an instance, rebuilding its system disk.
+
+    The system disk is restored from the instance's image, so changes made
+    outside the data disk are lost; the data disk itself is kept. The command
+    asks for confirmation unless ``--yes`` is passed; use ``--yes`` in scripts.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param yes: Whether to skip the confirmation prompt.
+    :raises click.ClickException: When the argument is blank, no token is
+        configured, or the API call fails.
+    :raises click.Abort: When the user declines the confirmation prompt.
+    """
+    config = load_config()
+    token = require_token(config)
+    if not yes:
+        click.confirm(
+            f"Reset instance {instance_uuid}? This rebuilds its system disk.",
+            abort=True,
+        )
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.reset_instance(client, instance_uuid)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Reset requested for instance {result['instance_uuid']}.")
 
 
 @instance.command("release", help="Release an instance, deleting it and its data disk.")

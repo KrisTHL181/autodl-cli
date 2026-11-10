@@ -35,6 +35,7 @@ __all__ = [
     "power_off",
     "power_on",
     "release_instance",
+    "reset_instance",
     "save_image",
 ]
 
@@ -311,6 +312,23 @@ def release_instance(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.release_instance(client, instance_uuid)
+
+
+def reset_instance(token: str, instance_uuid: str) -> dict[str, object]:
+    """Reset an instance, rebuilding its system disk.
+
+    AutoDL accepts the request immediately and answers with a null ``data``
+    payload. The system disk is restored from the instance's image; the data
+    disk is preserved.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``reset``.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.reset_instance(client, instance_uuid)
 
 
 def save_image(

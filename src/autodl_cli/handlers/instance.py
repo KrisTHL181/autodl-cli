@@ -32,6 +32,10 @@ Releasing an instance posts to ``POST /api/v1/instance/release`` with the same
 irreversible: the instance and its data disk are deleted. It does not go through
 the power-off endpoint first.
 
+Resetting an instance posts to ``POST /api/v1/instance/init`` with the same
+``{"instance_uuid": ...}`` body and answers with ``"data": null``. It rebuilds
+the system disk from the instance's image while keeping the data disk.
+
 Creating a pay-as-you-go instance posts the web console's order body to
 ``POST /api/v1/order/instance/create/payg``. Its ``data`` field is the new
 instance UUID string rather than an object, so :func:`create_instance` unwraps
@@ -74,6 +78,9 @@ INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
 
 #: Path of the release endpoint.
 INSTANCE_RELEASE_PATH = "/api/v1/instance/release"
+
+#: Path of the reset endpoint.
+INSTANCE_RESET_PATH = "/api/v1/instance/init"
 
 #: Path of the pay-as-you-go instance-create endpoint.
 INSTANCE_CREATE_PATH = "/api/v1/order/instance/create/payg"
@@ -499,6 +506,34 @@ def power_off(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     return {
         "instance_uuid": instance_uuid,
         "powered_off": True,
+    }
+
+
+def reset_instance(client: AutoDLClient, instance_id: str) -> dict[str, object]:
+    """Reset an instance, rebuilding its system disk.
+
+    ``POST /api/v1/instance/init`` answers with ``"data": null`` on success, so
+    success is signalled by the envelope's ``code`` alone. The system disk is
+    restored from the instance's image; the data disk is preserved.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``reset``.
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    body: dict[str, object] = {"instance_uuid": instance_uuid}
+    payload = client.request("POST", INSTANCE_RESET_PATH, json=body)
+    require_success_any(payload, action="reset instance")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "reset": True,
     }
 
 

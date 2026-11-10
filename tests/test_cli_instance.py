@@ -686,6 +686,123 @@ def test_power_off_api_failure_is_a_clean_click_exception(home: Path, monkeypatc
     assert "Traceback" not in result.output
 
 
+def test_reset_forwards_instance_and_returns_json(home: Path, monkeypatch) -> None:
+    """``--yes`` skips the prompt, forwards the UUID, and emits the result."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {"instance_uuid": INSTANCE_UUID, "reset": True}
+
+    def fake_reset_instance(client, instance_id):
+        captured["instance_id"] = instance_id
+        return record
+
+    monkeypatch.setattr(instance_commands.instance_handler, "reset_instance", fake_reset_instance)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "reset", INSTANCE_UUID, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": INSTANCE_UUID}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_reset_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms which instance was asked to reset."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "reset_instance",
+        lambda client, instance_id: {"instance_uuid": instance_id, "reset": True},
+    )
+
+    result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID, "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Reset requested for instance {INSTANCE_UUID}." in result.output
+    assert TOKEN not in result.output
+
+
+def test_reset_prompts_and_accepts(home: Path, monkeypatch) -> None:
+    """Without ``--yes`` the command asks, then resets when confirmed."""
+    _seed_token()
+    called: list[str] = []
+
+    def fake_reset_instance(client, instance_id):
+        called.append(instance_id)
+        return {"instance_uuid": instance_id, "reset": True}
+
+    monkeypatch.setattr(instance_commands.instance_handler, "reset_instance", fake_reset_instance)
+
+    result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert f"Reset instance {INSTANCE_UUID}?" in result.output
+    assert called == [INSTANCE_UUID]
+
+
+def test_reset_prompt_can_abort(home: Path, monkeypatch) -> None:
+    """Declining the prompt aborts without calling the handler."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "reset_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run when the prompt is declined"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID], input="n\n")
+
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_reset_blank_argument_is_a_clean_error(home: Path, monkeypatch) -> None:
+    """A blank UUID rejected by the handler exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_reset_instance(client, instance_id):
+        raise ValueError("instance_id must not be empty")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "reset_instance", failing_reset_instance)
+
+    result = CliRunner().invoke(main, ["instance", "reset", " ", "--yes"])
+
+    assert result.exit_code == 1
+    assert "instance_id must not be empty" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_reset_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "reset_instance",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID, "--yes"])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_reset_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_reset_instance(client, instance_id):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "reset_instance", failing_reset_instance)
+
+    result = CliRunner().invoke(main, ["instance", "reset", INSTANCE_UUID, "--yes"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_power_on_forwards_instance_and_returns_json(home: Path, monkeypatch) -> None:
     """The positional UUID reaches the handler; JSON is passed through."""
     _seed_token()

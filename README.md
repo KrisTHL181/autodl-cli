@@ -181,6 +181,8 @@ autodl instance detail <instance-uuid>
 autodl instance power-on <instance-uuid>
 autodl instance power-on <instance-uuid> --non-gpu
 autodl instance power-off <instance-uuid>
+autodl instance reset <instance-uuid>
+autodl instance reset <instance-uuid> --yes
 autodl instance release <instance-uuid>
 autodl instance release <instance-uuid> --yes
 autodl instance save-image <instance-uuid> my-image
@@ -197,7 +199,9 @@ immediately, and the instance may take a moment to show as running. Pass
 shows as `CPU` in `instance list`. `power-off`
 posts to `/api/v1/instance/power_off` and keeps the data disk; AutoDL releases
 a powered-off instance after the retention window shown by `instance list`
-unless it is powered on again. `release` posts to
+unless it is powered on again. `reset` posts to `/api/v1/instance/init` and
+rebuilds the system disk from the instance's image while keeping the data disk;
+it asks for confirmation unless `--yes` is passed. `release` posts to
 `/api/v1/instance/release` and deletes the instance and its data disk
 immediately; it is irreversible, so the command asks for confirmation unless
 `--yes` is passed. `save-image` posts to
