@@ -141,3 +141,92 @@ def test_non_object_json_body_maps_to_api_error() -> None:
             client.request("GET", "/api/v1/example")
 
     assert "non-object" in str(excinfo.value)
+
+
+def test_token_property_returns_the_configured_token() -> None:
+    """The read-only property exposes the token used for authentication."""
+
+    with _client(lambda request: httpx.Response(200, json={}), token="fake-token") as client:
+        assert client.token == "fake-token"
+
+    with _client(lambda request: httpx.Response(200, json={})) as client:
+        assert client.token == ""
+
+
+def test_stream_request_yields_an_unread_response() -> None:
+    """The response body is only consumed by the caller, not by the client."""
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(200, stream=httpx.ByteStream(b"streamed payload"), headers={"Content-Length": "16"})
+
+    with _client(handler, "fake-token") as client:
+        with client.stream_request("GET", "/api/v1/download") as response:
+            assert response.status_code == 200
+            assert response.is_stream_consumed is False
+            assert b"".join(response.iter_bytes()) == b"streamed payload"
+            assert response.is_stream_consumed is True
+
+    assert seen == ["fake-token"]
+
+
+def test_stream_request_can_omit_auth_and_append_params() -> None:
+    """A browser-style request can drop ``Authorization`` and carry a token."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    with _client(handler, "fake-token") as client:
+        with client.stream_request(
+            "GET",
+            "/api/v1/download/file/uuid",
+            params={"auth": client.token},
+            include_auth=False,
+        ) as response:
+            assert response.read() == b"ok"
+
+    assert seen[0].url.params["auth"] == "fake-token"
+    assert "authorization" not in seen[0].headers
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (401, AuthError),
+        (403, AuthError),
+        (404, NotFoundError),
+        (429, RateLimitError),
+        (500, APIError),
+    ],
+)
+def test_stream_request_maps_http_errors(status: int, error_type: type[Exception]) -> None:
+    """Streaming failures use the same status mapping as buffered requests."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"code": "Fail", "msg": "server said no"})
+
+    with _client(handler) as client:
+        with pytest.raises(error_type) as excinfo:
+            with client.stream_request("GET", "/api/v1/example"):
+                pass
+
+    message = str(excinfo.value)
+    assert str(status) in message
+    assert "server said no" in message
+
+
+def test_stream_request_maps_network_errors() -> None:
+    """A transport failure while streaming becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with _client(handler) as client:
+        with pytest.raises(APIError) as excinfo:
+            with client.stream_request("GET", "/api/v1/example"):
+                pass
+
+    assert "connection refused" in str(excinfo.value)

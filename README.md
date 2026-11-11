@@ -259,24 +259,46 @@ returns the new instance UUID immediately and does not prompt for confirmation.
 
 AutoDL's network disk is regional: each region has its own volume and its own
 API host. `nfs regions` shows the available signs, hosts, and quota. `nfs ls`
-reads a directory, `nfs rm` deletes a file, and `nfs upload` sends a local file
-in the same 5 MiB chunks the web console uses, so large files work too.
+reads a directory, `nfs download` retrieves a file, `nfs upload` sends a local
+file in the same 5 MiB chunks the web console uses, `nfs rm` deletes a file (or
+a directory with `-r`), and `nfs df` reports live usage (optionally for one
+region).
 
 ```bash
 autodl nfs regions
 autodl nfs ls / --region bj-B1
 autodl nfs ls /datasets --region bj-B1
+autodl nfs download /models/model.bin --region bj-B1
+autodl nfs download /models/model.bin --region bj-B1 -o ./checkpoints/
 autodl nfs upload ./model.bin --region bj-B1
 autodl nfs upload ./model.bin --region bj-B1 --dir-path /models --filename v2.bin
 autodl nfs rm /models/old.bin --region bj-B1
 autodl nfs rm /models/old.bin --region bj-B1 --yes
+autodl nfs rm /models/old --region bj-B1 -r
+autodl nfs df
+autodl nfs df --region bj-B1
 ```
 
-`--region` is required because there is no account-wide default volume. Uploads
-hash the first 1 MiB of the file and send that digest with every chunk, matching
-the console; a file larger than 5 MiB is split into ordered multipart chunks,
-with `is_last` set on the final one. `rm` is irreversible and asks for
-confirmation unless `--yes` is passed; it deletes files, not directories.
+`--region` is required because there is no account-wide default volume (only
+`nfs df` can omit it to show every region). `nfs df` reads each created volume's
+`/detail` endpoint for total and used space plus inode counts, and also shows
+the free-of-charge allowance and maximum capacity. Volumes that are not
+initialised yet are listed with `-` usage, because the server rejects the detail
+request for them. Uploads hash the first 1 MiB of the
+file and send that digest with every chunk, matching the console; a file larger
+than 5 MiB is split into ordered multipart chunks, with `is_last` set on the
+final one.
+
+Downloads are a two-step process: a JSON call asks the region host for a
+short-lived download token, then a browser-style GET fetches the raw file with
+that token in the `auth` query string and no `Authorization` header. The
+destination defaults to the remote file name in the current directory; pass
+`-o/--output` with a file path or an existing directory, and `--force` to
+overwrite an existing file.
+
+`rm` is irreversible and asks for confirmation unless `--yes` is passed. With
+`-r` it targets the console's directory endpoint and warns that the directory's
+contents are included. Use `--yes` in scripts.
 
 ### 🛠️ API Debugging
 

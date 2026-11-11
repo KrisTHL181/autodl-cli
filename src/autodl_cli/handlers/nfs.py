@@ -13,20 +13,27 @@ the web console's WebUploader configuration: a multipart ``POST /file`` per
 1 MiB of the file. Files split into more than one chunk also carry
 WebUploader's ``chunks`` total and ``chunk`` index. ``file_uuid`` is the
 upload's epoch-millisecond identifier.
+
+Downloads are a two-step process: a JSON ``POST /file/download_token`` on the
+region host returns a UUID, and the file itself is then fetched with a plain
+browser-style ``GET /file/download/file/{uuid}?auth={token}``. The second request
+carries no ``Authorization`` header and its body is the raw file.
 """
 
 from __future__ import annotations
 
 import hashlib
 import mimetypes
+import os
 import re
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from autodl_cli.errors import APIError
-from autodl_cli.handlers._common import require_success_any, require_success_list
+from autodl_cli.errors import APIError, AutoDLError
+from autodl_cli.handlers._common import require_success, require_success_any, require_success_list
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,6 +48,9 @@ HASH_LIMIT = 1024 * 1024
 
 #: Per-chunk timeout, generous enough for a 5 MiB upload on a slow link.
 UPLOAD_TIMEOUT = 300.0
+
+#: Timeout for a file download, which may be much larger than one API reply.
+DOWNLOAD_TIMEOUT = 300.0
 
 #: Collapse accidental duplicate slashes in a remote directory path.
 _MULTIPLE_SLASHES = re.compile("/{2,}")
@@ -272,7 +282,7 @@ def split_remote_path(value: str) -> tuple[str, str]:
     """
     path = normalize_dir_path(value)
     if path == "/":
-        raise ValueError("Refusing to delete the NFS root directory")
+        raise ValueError("Refusing to operate on the NFS root directory")
     dir_path, _, filename = path.rpartition("/")
     return dir_path or "/", _validate_filename(filename)
 
@@ -307,6 +317,225 @@ def delete_file(client: AutoDLClient, remote_path: str, *, region: str) -> dict[
         "remote_path": _remote_path(dir_path, filename),
         "deleted": True,
     }
+
+
+def delete_directory(client: AutoDLClient, remote_path: str, *, region: str) -> dict[str, object]:
+    """Delete one directory from an NFS volume.
+
+    This targets the web console's directory endpoint (``DELETE /dir``).
+    Whether the server deletes the directory recursively is not verified here.
+
+    :param client: Authenticated API client.
+    :param remote_path: Remote directory path, for example ``"/data/old"``.
+    :param region: Region sign, for example ``bj-B1``.
+    :returns: A mapping with ``region``, ``region_name``, ``dir_path``,
+        ``dir_name``, ``remote_path``, and ``deleted``.
+    :raises ValueError: When the remote path is invalid.
+    :raises autodl_cli.errors.AutoDLError: When the API rejects the request.
+    """
+    dir_path, dir_name = split_remote_path(remote_path)
+    volume = get_region(client, region)
+    url = f"{region_base_url(volume)}/dir"
+
+    payload = client.request("DELETE", url, json={"dir_name": dir_name, "dir_path": dir_path})
+    require_success_any(payload, action=f"NFS delete of {dir_name!r}")
+
+    return {
+        "region": str(volume["sign"]),
+        "region_name": _as_text(volume.get("name")),
+        "dir_path": dir_path,
+        "dir_name": dir_name,
+        "remote_path": _remote_path(dir_path, dir_name),
+        "deleted": True,
+    }
+
+
+def download_file(
+    client: AutoDLClient,
+    remote_path: str,
+    *,
+    region: str,
+    local_path: Path | str,
+    overwrite: bool = False,
+    on_progress: Callable[[int, int | None], None] | None = None,
+) -> dict[str, object]:
+    """Download one file from an NFS volume.
+
+    The download has two steps: a JSON call asks the region host for a download
+    token (a UUID), then a browser-style ``GET`` fetches the raw file using that
+    token in the ``auth`` query parameter and no ``Authorization`` header. The
+    file is written to a temporary sibling and moved into place only after every
+    byte has arrived, so a failed download leaves no partial target file.
+
+    :param client: Authenticated API client.
+    :param remote_path: Remote file path, for example ``"/data/notes.txt"``.
+    :param region: Region sign, for example ``bj-B1``.
+    :param local_path: Destination file path.
+    :param overwrite: Whether an existing destination may be replaced.
+    :param on_progress: Optional callback receiving the bytes written so far
+        and the declared total (or ``None``). Called after every chunk and once
+        more at the end.
+    :returns: A mapping with ``region``, ``region_name``, ``dir_path``,
+        ``filename``, ``remote_path``, ``local_path``, ``size``, and ``total``.
+    :raises ValueError: When the remote path is invalid, the destination exists
+        and ``overwrite`` is false, or its parent directory is missing.
+    :raises autodl_cli.errors.AutoDLError: When the API rejects a request.
+    """
+    dir_path, filename = split_remote_path(remote_path)
+    destination = Path(local_path).expanduser()
+    if destination.exists() and not overwrite:
+        raise ValueError(f"Local file already exists: {destination}")
+    parent = destination.parent
+    if not parent.is_dir():
+        raise ValueError(f"Local directory not found: {parent}")
+
+    volume = get_region(client, region)
+    base = region_base_url(volume)
+
+    payload = client.request(
+        "POST",
+        f"{base}/file/download_token",
+        json={"filename": filename, "dir_path": dir_path},
+    )
+    download_token = require_success_any(payload, action=f"NFS download of {filename!r}")
+    if not isinstance(download_token, str) or not download_token:
+        raise APIError(f"AutoDL NFS download of {filename!r} returned malformed data")
+
+    url = f"{base}/download/file/{download_token}"
+    written = 0
+    total: int | None = None
+    handle_number, temporary_name = tempfile.mkstemp(prefix=f".{filename}.", dir=str(parent))
+    temporary_path = Path(temporary_name)
+    try:
+        with (
+            os.fdopen(handle_number, "wb") as handle,
+            client.stream_request(
+                "GET",
+                url,
+                params={"auth": client.token},
+                include_auth=False,
+                timeout=DOWNLOAD_TIMEOUT,
+            ) as response,
+        ):
+            length = response.headers.get("Content-Length")
+            if length is not None:
+                try:
+                    declared = int(length)
+                except ValueError:
+                    declared = -1
+                total = declared if declared >= 0 else None
+            for chunk in response.iter_bytes():
+                handle.write(chunk)
+                written += len(chunk)
+                if on_progress is not None:
+                    on_progress(written, total)
+            if on_progress is not None:
+                on_progress(written, total)
+        os.replace(temporary_path, destination)
+    except BaseException:
+        # Never leave a partial file behind, including on Ctrl-C.
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+    return {
+        "region": str(volume["sign"]),
+        "region_name": _as_text(volume.get("name")),
+        "dir_path": dir_path,
+        "filename": filename,
+        "remote_path": _remote_path(dir_path, filename),
+        "local_path": str(destination),
+        "size": written,
+        "total": total,
+    }
+
+
+def storage_usage(client: AutoDLClient, *, region: str | None = None) -> list[dict[str, object]]:
+    """Return live capacity and usage figures for each NFS volume.
+
+    The account-wide region list supplies the quota metadata. For each volume
+    whose status is ``created``, this also calls that region's ``/detail``
+    endpoint, which reports the bytes and inodes actually in use. Volumes that
+    are not ready are never called; their usage fields stay ``None`` because the
+    server rejects the request for them. A failing detail call is recorded on
+    that row instead of aborting the whole list.
+
+    :param client: Authenticated API client.
+    :param region: Optional region sign to keep, compared case-insensitively.
+    :returns: One mapping per region with ``sign``, ``name``, ``status``,
+        ``total_space``, ``used_space``, ``free_space``, ``used_percent``,
+        ``total_inodes``, ``used_inodes``, ``free_inodes``, ``free_allowance``
+        (the free-of-charge allowance, not free space), ``max_size``, and
+        ``usage_error``.
+    :raises autodl_cli.errors.APIError: When ``region`` matches no volume.
+    :raises autodl_cli.errors.AutoDLError: When the region list is rejected.
+    """
+    regions = list_regions(client)
+    available_regions = regions
+    if region is not None:
+        requested = region.strip().lower()
+        regions = [
+            entry for entry in regions if isinstance(entry.get("sign"), str) and str(entry["sign"]).lower() == requested
+        ]
+        if not regions:
+            available = ", ".join(str(entry["sign"]) for entry in available_regions) or "none"
+            raise APIError(f"Unknown NFS region {region!r}; available regions: {available}")
+
+    rows: list[dict[str, object]] = []
+    for entry in regions:
+        sign = entry.get("sign")
+        status = entry.get("status")
+        total_space: int | None = None
+        used_space: int | None = None
+        total_inodes: int | None = None
+        used_inodes: int | None = None
+        usage_error: str | None = None
+
+        if status == "created":
+            try:
+                payload = client.request("GET", f"{region_base_url(entry)}/detail")
+                detail = require_success(payload, action=f"NFS storage detail for {sign!r}")
+            except AutoDLError as exc:
+                usage_error = str(exc)
+            else:
+                total_space = _as_int(detail.get("total_space"))
+                used_space = _as_int(detail.get("used_space"))
+                total_inodes = _as_int(detail.get("total_inodes"))
+                used_inodes = _as_int(detail.get("used_inodes"))
+
+        if total_space is not None and used_space is not None:
+            free_space: int | None = max(total_space - used_space, 0)
+        else:
+            free_space = None
+        if total_space is not None and used_space is not None and total_space > 0:
+            used_percent: float | None = round(used_space / total_space * 100, 1)
+        else:
+            used_percent = None
+        if total_inodes is not None and used_inodes is not None:
+            free_inodes: int | None = max(total_inodes - used_inodes, 0)
+        else:
+            free_inodes = None
+
+        rows.append(
+            {
+                "sign": sign,
+                "name": entry.get("name"),
+                "status": status,
+                "total_space": total_space,
+                "used_space": used_space,
+                "free_space": free_space,
+                "used_percent": used_percent,
+                "total_inodes": total_inodes,
+                "used_inodes": used_inodes,
+                "free_inodes": free_inodes,
+                "free_allowance": _as_int(entry.get("free_size")),
+                "max_size": _as_int(entry.get("max_size")),
+                "usage_error": usage_error,
+            }
+        )
+    return rows
 
 
 def upload_file(

@@ -8,6 +8,7 @@ the exception types in :mod:`autodl_cli.errors`.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -15,7 +16,7 @@ import httpx
 from autodl_cli.errors import APIError, AuthError, NotFoundError, RateLimitError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
     from types import TracebackType
 
 #: Root of the public AutoDL website; this is the API the web console calls.
@@ -68,6 +69,31 @@ def _error_message(response: httpx.Response, method: str, path: str) -> str:
     return message
 
 
+def _raise_for_status(response: httpx.Response, method: str, path: str) -> None:
+    """Map a non-2xx response to the matching exception type.
+
+    This is shared by :meth:`AutoDLClient.request` and
+    :meth:`AutoDLClient.stream_request` so both report identical messages.
+
+    :param response: The response to inspect.
+    :param method: HTTP method used for the request.
+    :param path: Path or URL used for the request.
+    :raises autodl_cli.errors.AuthError: On HTTP 401 or 403.
+    :raises autodl_cli.errors.NotFoundError: On HTTP 404.
+    :raises autodl_cli.errors.RateLimitError: On HTTP 429.
+    :raises autodl_cli.errors.APIError: On any other non-2xx response.
+    """
+    status = response.status_code
+    if status in (401, 403):
+        raise AuthError(_error_message(response, method, path))
+    if status == 404:
+        raise NotFoundError(_error_message(response, method, path))
+    if status == 429:
+        raise RateLimitError(_error_message(response, method, path))
+    if not 200 <= status < 300:
+        raise APIError(_error_message(response, method, path))
+
+
 class AutoDLClient:
     """Authenticated client for the AutoDL web-console API.
 
@@ -103,6 +129,15 @@ class AutoDLClient:
             timeout=timeout,
             transport=transport,
         )
+
+    @property
+    def token(self) -> str:
+        """Return the configured API token.
+
+        :returns: The token sent in the ``Authorization`` header, or ``""``
+            when no token is configured.
+        """
+        return self._token
 
     def headers_for(
         self,
@@ -152,16 +187,9 @@ class AutoDLClient:
         except httpx.RequestError as exc:
             raise APIError(f"Request to {method.upper()} {path} failed: {exc}") from exc
 
-        status = response.status_code
-        if status in (401, 403):
-            raise AuthError(_error_message(response, method, path))
-        if status == 404:
-            raise NotFoundError(_error_message(response, method, path))
-        if status == 429:
-            raise RateLimitError(_error_message(response, method, path))
-        if not 200 <= status < 300:
-            raise APIError(_error_message(response, method, path))
+        _raise_for_status(response, method, path)
 
+        status = response.status_code
         try:
             payload = response.json()
         except ValueError as exc:
@@ -169,6 +197,48 @@ class AutoDLClient:
         if not isinstance(payload, dict):
             raise APIError(f"AutoDL API returned a non-object JSON body for {method.upper()} {path} (HTTP {status})")
         return payload
+
+    @contextmanager
+    def stream_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        include_auth: bool = True,
+        app_version: bool = True,
+        **kwargs: Any,
+    ) -> Iterator[httpx.Response]:
+        """Send one request and yield its response without buffering the body.
+
+        This is meant for downloads and other large responses that must not be
+        loaded into memory. The response is only fully read when it is an error,
+        so the exception carries the server's ``msg`` field.
+
+        :param method: HTTP method.
+        :param url: Absolute URL, or a path relative to ``base_url``.
+        :param headers: Per-request headers, which override the defaults.
+        :param include_auth: Whether to attach the ``Authorization`` header.
+        :param app_version: Whether to attach the ``AppVersion`` header.
+        :param kwargs: Extra arguments forwarded to the underlying client.
+        :yields: The open response, whose body is still unread.
+        :raises autodl_cli.errors.AuthError: On HTTP 401 or 403.
+        :raises autodl_cli.errors.NotFoundError: On HTTP 404.
+        :raises autodl_cli.errors.RateLimitError: On HTTP 429.
+        :raises autodl_cli.errors.APIError: On a transport failure or any other
+            non-2xx response.
+        """
+        request_headers = self.headers_for(headers, include_auth=include_auth, app_version=app_version)
+        try:
+            with self._client.stream(method, url, headers=request_headers, **kwargs) as response:
+                if not 200 <= response.status_code < 300:
+                    # The body is still unread, so read it before building the
+                    # error message from the server's ``msg`` field.
+                    response.read()
+                    _raise_for_status(response, method, url)
+                yield response
+        except httpx.RequestError as exc:
+            raise APIError(f"Request to {method.upper()} {url} failed: {exc}") from exc
 
     def raw_request(
         self,

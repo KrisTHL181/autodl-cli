@@ -1933,6 +1933,142 @@ def render_nfs_upload(result: Mapping[str, object]) -> None:
     console.print(text)
 
 
+def render_nfs_download(result: Mapping[str, object]) -> None:
+    """Render a successful NFS download summary.
+
+    :param result: Mapping returned by
+        :func:`autodl_cli.handlers.nfs.download_file`.
+    """
+    text = Text("Downloaded ", style=_STYLE_OK)
+    text.append(_format_value(result.get("filename")), style=_STYLE_LABEL)
+    text.append(" to ", style=_STYLE_META)
+    text.append(_format_value(result.get("local_path")), style=_STYLE_COLUMN)
+
+    details = [_format_bytes(result.get("size")), _format_value(result.get("region"))]
+    text.append(f" ({', '.join(details)})", style=_STYLE_META)
+    console.print(text)
+
+
+def _nfs_status_text(value: object) -> Text:
+    """Build the colour-coded status cell shared by the NFS tables.
+
+    :param value: Status string from the API.
+    :returns: The status in green when created, yellow when pending, or dim
+        when missing.
+    """
+    status = _format_value(value)
+    status_style = _STYLE_OK if status == "created" else _STYLE_WARN if status != "-" else _STYLE_META
+    return Text(status, style=status_style)
+
+
+def _nfs_df_row(
+    row: Mapping[str, object],
+    *,
+    include_inodes: bool,
+    include_max: bool,
+) -> tuple[Text, ...]:
+    """Build one row of the NFS usage table.
+
+    :param row: One mapping returned by
+        :func:`autodl_cli.handlers.nfs.storage_usage`.
+    :param include_inodes: Whether the optional Inodes column is present.
+    :param include_max: Whether the optional Max column is present.
+    :returns: One styled cell per displayed column.
+    """
+    percent = row.get("used_percent")
+    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+        percent_text = f"{percent}%"
+        percent_style = _disk_style(float(percent))
+    else:
+        percent_text = "-"
+        percent_style = _STYLE_META
+
+    cells = (
+        _value_cell(row.get("name"), _STYLE_LABEL),
+        _value_cell(row.get("sign"), _STYLE_COLUMN),
+        _nfs_status_text(row.get("status")),
+        _value_cell(_format_bytes(row.get("total_space")), _STYLE_NUM),
+        _value_cell(_format_bytes(row.get("used_space")), _STYLE_NUM),
+        _value_cell(_format_bytes(row.get("free_space")), _STYLE_NUM),
+        _value_cell(percent_text, percent_style),
+    )
+    if include_inodes:
+        total_inodes = row.get("total_inodes")
+        used_inodes = row.get("used_inodes")
+        if (
+            isinstance(total_inodes, int)
+            and not isinstance(total_inodes, bool)
+            and isinstance(used_inodes, int)
+            and not isinstance(used_inodes, bool)
+        ):
+            inodes_cell = _value_cell(f"{used_inodes} / {total_inodes}", _STYLE_NUM)
+        else:
+            inodes_cell = _value_cell("-", _STYLE_META)
+        cells += (inodes_cell,)
+    if include_max:
+        cells += (_value_cell(_format_bytes(row.get("max_size")), _STYLE_NUM),)
+    return cells
+
+
+def _nfs_df_fits(headers: Sequence[str], rows: Sequence[Sequence[Text]]) -> bool:
+    """Return whether a table with these columns fits the console.
+
+    :param headers: Column headers, in display order.
+    :param rows: Pre-built row cells.
+    :returns: ``True`` when the natural table width is within the console.
+    """
+    content_widths = [
+        max(_text_width(header), *(_text_width(row[index]) for row in rows)) for index, header in enumerate(headers)
+    ]
+    cell_padding = 2  # one space on each side of every cell
+    border_width = 2 + len(headers) - 1  # table edges plus the inner borders
+    return sum(width + cell_padding for width in content_widths) + border_width <= console.width
+
+
+def render_nfs_df(rows: Sequence[dict[str, object]]) -> None:
+    """Render live NFS usage per region as a Rich table.
+
+    The table shows capacity, used and free space, the used percentage, inode
+    counts, and the maximum capacity. On narrow terminals the optional Max
+    column is dropped first, then Inodes, so the essential figures stay
+    readable. Rows whose detail call failed show ``"-"`` and a muted warning
+    line follows the table. ``--json`` callers receive the handler rows
+    unchanged.
+
+    :param rows: Mappings returned by
+        :func:`autodl_cli.handlers.nfs.storage_usage`.
+    """
+    if not rows:
+        console.print("No NFS regions found.", style=_STYLE_META)
+        return
+
+    full_headers = ("Region", "Sign", "Status", "Total", "Used", "Free", "Use%", "Inodes", "Max")
+    full_rows = [_nfs_df_row(row, include_inodes=True, include_max=True) for row in rows]
+    if _nfs_df_fits(full_headers, full_rows):
+        headers = full_headers
+        display_rows = full_rows
+    elif _nfs_df_fits(full_headers[:-1], [row[:-1] for row in full_rows]):
+        headers = full_headers[:-1]
+        display_rows = [row[:-1] for row in full_rows]
+    else:
+        headers = full_headers[:-2]
+        display_rows = [row[:-2] for row in full_rows]
+
+    table = _table("NFS usage")
+    for header in headers:
+        right_aligned = header in ("Total", "Used", "Free", "Use%", "Inodes", "Max")
+        table.add_column(header, justify="right" if right_aligned else "left")
+    for row in display_rows:
+        table.add_row(*row)
+    console.print(table)
+
+    for row in rows:
+        error = row.get("usage_error")
+        if isinstance(error, str) and error:
+            sign = _format_value(row.get("sign"))
+            console.print(f"Usage unavailable for {sign}: {error}", style=_STYLE_META, markup=False)
+
+
 @contextmanager
 def upload_progress(filename: str, total: int) -> Iterator[Callable[[int], None]]:
     """Show a progress bar while a file is uploaded.
@@ -1964,6 +2100,50 @@ def upload_progress(filename: str, total: int) -> Iterator[Callable[[int], None]
         """
         completed = size if total <= 0 else min(max(sent, 0), total)
         progress.update(task_id, completed=completed)
+
+    try:
+        yield update
+    finally:
+        progress.stop()
+
+
+@contextmanager
+def download_progress(filename: str) -> Iterator[Callable[[int, int | None], None]]:
+    """Show a progress bar while a file is downloaded.
+
+    The total size is unknown until the response headers arrive, so the task
+    starts indeterminate and switches to a determinate bar the first time the
+    callback supplies a total. The bar is transient, so a finished download
+    leaves only the summary line on screen.
+
+    :param filename: File name shown next to the bar.
+    :yields: A callback that accepts the bytes received so far and the total
+        announced by the server, or ``None`` when it is unknown.
+    """
+    progress = Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+    task_id = progress.add_task(filename, total=None)
+    progress.start()
+    total_known = False
+
+    def update(received: int, total: int | None) -> None:
+        """Advance the bar to *received* bytes.
+
+        :param received: Number of bytes received so far.
+        :param total: Declared total size, or ``None`` when unknown.
+        """
+        nonlocal total_known
+        if total is not None and not total_known:
+            total_known = True
+            progress.update(task_id, total=total)
+        progress.update(task_id, completed=max(received, 0))
 
     try:
         yield update

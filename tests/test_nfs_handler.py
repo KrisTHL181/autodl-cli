@@ -60,6 +60,14 @@ DIRECTORY = [
     {"filename": "legacy.bin", "size": 10, "updated_at": "2026-09-01T00:00:00Z", "is_dir": False},
 ]
 
+#: Live usage reported by ``GET /file_storage/detail`` for a created volume.
+DETAIL = {
+    "total_space": 214748364800,
+    "total_inodes": 200000,
+    "used_space": 16305467392,
+    "used_inodes": 46,
+}
+
 
 def _success(data: object) -> httpx.Response:
     """Build a successful API envelope.
@@ -71,7 +79,7 @@ def _success(data: object) -> httpx.Response:
 
 
 def _router(directory: object = DIRECTORY, *, seen: list[httpx.Request] | None = None):
-    """Build a transport handler serving the catalogue and one directory.
+    """Build a transport handler serving the catalogue, detail, and a directory.
 
     :param directory: Payload for the directory listing.
     :param seen: Optional list that receives every request.
@@ -83,6 +91,8 @@ def _router(directory: object = DIRECTORY, *, seen: list[httpx.Request] | None =
             seen.append(request)
         if request.url.host == "www.autodl.com" and request.url.path == "/api/v1/file_storage/list":
             return _success(REGIONS)
+        if request.url.path == "/api/v1/file_storage/detail":
+            return _success(DETAIL)
         if request.url.path.endswith(("/dir/v2", "/dir")):
             return _success(directory)
         return _success(1)
@@ -470,3 +480,285 @@ def test_upload_file_reports_a_rejected_chunk(tmp_path: Path) -> None:
     with _client(handler) as client:
         with pytest.raises(AuthError, match="expired"):
             nfs_handler.upload_file(client, source, region="bj-B1")
+
+
+def _download_router(
+    seen: list[httpx.Request],
+    *,
+    content: bytes = b"hello nfs",
+    download_token: object = "5153303f-c4c9-41e0-a550-d0e3ec2556e7",
+):
+    """Build a transport serving the catalogue, the token, and the raw file.
+
+    :param seen: List that receives every request.
+    :param content: Raw bytes returned by the download endpoint.
+    :param download_token: ``data`` value returned by the token endpoint.
+    :returns: A function suitable for :class:`httpx.MockTransport`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "www.autodl.com":
+            return _success(REGIONS)
+        if request.url.path.endswith("/download_token"):
+            return _success(download_token)
+        if "/download/file/" in request.url.path:
+            return httpx.Response(200, content=content, headers={"Content-Length": str(len(content))})
+        return _success(1)
+
+    return handler
+
+
+def test_download_file_uses_a_token_and_an_unauthenticated_get(tmp_path: Path) -> None:
+    """The token POST is authenticated; the raw GET carries ``auth`` only."""
+    seen: list[httpx.Request] = []
+    progress: list[tuple[int, int | None]] = []
+    target = tmp_path / "notes.txt"
+
+    with _client(_download_router(seen)) as client:
+        result = nfs_handler.download_file(
+            client,
+            "/data/notes.txt",
+            region="bj-B1",
+            local_path=target,
+            on_progress=lambda written, total: progress.append((written, total)),
+        )
+
+    token_request = next(request for request in seen if request.url.path.endswith("/download_token"))
+    assert token_request.method == "POST"
+    assert token_request.url.host == REGION_HOST
+    assert token_request.url.port == REGION_PORT
+    assert token_request.url.path == "/api/v1/file_storage/file/download_token"
+    assert token_request.headers["authorization"] == TOKEN
+    assert json.loads(token_request.content) == {"filename": "notes.txt", "dir_path": "/data"}
+
+    download = next(request for request in seen if "/download/file/" in request.url.path)
+    assert download.method == "GET"
+    assert download.url.path == "/api/v1/file_storage/download/file/5153303f-c4c9-41e0-a550-d0e3ec2556e7"
+    assert download.url.params["auth"] == TOKEN
+    assert "authorization" not in download.headers
+
+    assert target.read_bytes() == b"hello nfs"
+    assert result == {
+        "region": "bj-B1",
+        "region_name": "北京B区",
+        "dir_path": "/data",
+        "filename": "notes.txt",
+        "remote_path": "/data/notes.txt",
+        "local_path": str(target),
+        "size": 9,
+        "total": 9,
+    }
+    assert progress
+    assert progress[-1] == (9, 9)
+    assert all(written == 9 and total == 9 for written, total in progress)
+
+
+def test_download_file_reports_progress_for_an_empty_file(tmp_path: Path) -> None:
+    """A zero-byte file still produces one final progress callback."""
+    progress: list[tuple[int, int | None]] = []
+    target = tmp_path / "empty.bin"
+
+    with _client(_download_router([], content=b"")) as client:
+        result = nfs_handler.download_file(
+            client,
+            "/empty.bin",
+            region="bj-B1",
+            local_path=target,
+            on_progress=lambda written, total: progress.append((written, total)),
+        )
+
+    assert target.read_bytes() == b""
+    assert progress == [(0, 0)]
+    assert result["size"] == 0
+    assert result["total"] == 0
+
+
+def test_download_file_refuses_to_overwrite_before_any_request(tmp_path: Path) -> None:
+    """An existing destination is rejected locally."""
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"keep me")
+    seen: list[httpx.Request] = []
+
+    with _client(_download_router(seen)) as client:
+        with pytest.raises(ValueError) as excinfo:
+            nfs_handler.download_file(client, "/notes.txt", region="bj-B1", local_path=target)
+
+    assert str(excinfo.value) == f"Local file already exists: {target}"
+    assert seen == []
+    assert target.read_bytes() == b"keep me"
+
+
+def test_download_file_accepts_overwrite(tmp_path: Path) -> None:
+    """``overwrite=True`` replaces the existing destination."""
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"old")
+
+    with _client(_download_router([])) as client:
+        nfs_handler.download_file(
+            client,
+            "/notes.txt",
+            region="bj-B1",
+            local_path=target,
+            overwrite=True,
+        )
+
+    assert target.read_bytes() == b"hello nfs"
+
+
+def test_download_file_requires_an_existing_parent(tmp_path: Path) -> None:
+    """A missing destination directory is rejected before any request."""
+    seen: list[httpx.Request] = []
+    target = tmp_path / "missing" / "notes.txt"
+
+    with _client(_download_router(seen)) as client:
+        with pytest.raises(ValueError, match="directory"):
+            nfs_handler.download_file(client, "/notes.txt", region="bj-B1", local_path=target)
+
+    assert seen == []
+    assert not target.exists()
+
+
+def test_download_file_rejects_malformed_token_data(tmp_path: Path) -> None:
+    """A token reply without a non-empty string is an API error."""
+    target = tmp_path / "notes.txt"
+
+    with _client(_download_router([], download_token=None)) as client:
+        with pytest.raises(APIError, match="malformed data"):
+            nfs_handler.download_file(client, "/notes.txt", region="bj-B1", local_path=target)
+
+    assert not target.exists()
+
+
+def test_download_file_rejects_the_root_path(tmp_path: Path) -> None:
+    """The shared path splitter rejects the volume root."""
+    with _client(_download_router([])) as client:
+        with pytest.raises(ValueError, match="root directory"):
+            nfs_handler.download_file(client, "/", region="bj-B1", local_path=tmp_path / "x")
+
+
+def test_delete_directory_sends_the_dir_body_to_the_region_host() -> None:
+    """Delete targets ``/dir`` with the split directory name."""
+    seen: list[httpx.Request] = []
+
+    with _client(_router(seen=seen)) as client:
+        result = nfs_handler.delete_directory(client, "/data/old", region="bj-B1")
+
+    request = seen[-1]
+    assert request.method == "DELETE"
+    assert request.url.host == REGION_HOST
+    assert request.url.port == REGION_PORT
+    assert request.url.path == "/api/v1/file_storage/dir"
+    assert request.headers["authorization"] == TOKEN
+    assert json.loads(request.content) == {"dir_name": "old", "dir_path": "/data"}
+    assert result == {
+        "region": "bj-B1",
+        "region_name": "北京B区",
+        "dir_path": "/data",
+        "dir_name": "old",
+        "remote_path": "/data/old",
+        "deleted": True,
+    }
+
+
+def test_storage_usage_reads_live_detail_for_created_regions() -> None:
+    """Created volumes report live space and inode usage from ``/detail``."""
+    seen: list[httpx.Request] = []
+
+    with _client(_router(seen=seen)) as client:
+        rows = nfs_handler.storage_usage(client)
+
+    detail_requests = [request for request in seen if request.url.path == "/api/v1/file_storage/detail"]
+    assert len(detail_requests) == 1
+    detail_request = detail_requests[0]
+    assert detail_request.method == "GET"
+    assert detail_request.url.host == REGION_HOST
+    assert detail_request.url.port == REGION_PORT
+    assert detail_request.headers["authorization"] == TOKEN
+
+    assert rows[0] == {
+        "sign": "bj-B1",
+        "name": "北京B区",
+        "status": "created",
+        "total_space": 214748364800,
+        "used_space": 16305467392,
+        "free_space": 198442897408,
+        "used_percent": 7.6,
+        "total_inodes": 200000,
+        "used_inodes": 46,
+        "free_inodes": 199954,
+        "free_allowance": 21474836480,
+        "max_size": 54975581388800,
+        "usage_error": None,
+    }
+
+    # An uninitialised volume is listed, never queried, and shows no usage.
+    assert rows[1]["sign"] == "west-X"
+    assert rows[1]["status"] == "uninitialized"
+    assert rows[1]["total_space"] is None
+    assert rows[1]["used_space"] is None
+    assert rows[1]["free_space"] is None
+    assert rows[1]["used_percent"] is None
+    assert rows[1]["total_inodes"] is None
+    assert rows[1]["used_inodes"] is None
+    assert rows[1]["free_inodes"] is None
+    assert rows[1]["usage_error"] is None
+    assert rows[1]["free_allowance"] == 21474836480
+    assert rows[1]["max_size"] == 54975581388800
+
+
+def test_storage_usage_continues_when_one_detail_call_fails() -> None:
+    """A rejected detail call is recorded without hiding the other regions."""
+    regions = [
+        REGIONS[0],
+        {
+            **REGIONS[0],
+            "sign": "sh-A1",
+            "name": "上海A区",
+            "export_addr_1": "region-sha1-fs.autodl.com",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.autodl.com":
+            return _success(regions)
+        if request.url.path == "/api/v1/file_storage/detail":
+            if request.url.host == REGION_HOST:
+                return httpx.Response(200, json={"code": "BadRequest", "data": None, "msg": "detail exploded"})
+            return _success(DETAIL)
+        return _success(1)
+
+    with _client(handler) as client:
+        rows = nfs_handler.storage_usage(client)
+
+    assert rows[0]["sign"] == "bj-B1"
+    assert rows[0]["usage_error"] is not None
+    assert "detail exploded" in str(rows[0]["usage_error"])
+    assert rows[0]["total_space"] is None
+    assert rows[0]["used_percent"] is None
+    assert rows[0]["free_allowance"] == 21474836480
+
+    assert rows[1]["sign"] == "sh-A1"
+    assert rows[1]["usage_error"] is None
+    assert rows[1]["total_space"] == DETAIL["total_space"]
+    assert rows[1]["used_space"] == DETAIL["used_space"]
+    assert rows[1]["used_percent"] == 7.6
+
+
+def test_storage_usage_filters_by_region_case_insensitively() -> None:
+    """A region filter keeps only the matching volume."""
+    seen: list[httpx.Request] = []
+
+    with _client(_router(seen=seen)) as client:
+        rows = nfs_handler.storage_usage(client, region=" bj-b1 ")
+
+    assert [row["sign"] for row in rows] == ["bj-B1"]
+    assert rows[0]["total_space"] == DETAIL["total_space"]
+    assert len([request for request in seen if request.url.path.endswith("/detail")]) == 1
+
+
+def test_storage_usage_rejects_an_unknown_region() -> None:
+    """An unknown filter lists the available signs."""
+    with _client(_router()) as client:
+        with pytest.raises(APIError, match="Unknown NFS region 'nowhere'.*bj-B1, west-X"):
+            nfs_handler.storage_usage(client, region="nowhere")
