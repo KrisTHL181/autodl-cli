@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import httpx
+import pytest
 
 from autodl_cli.client import AutoDLClient
 from autodl_cli.handlers import tools
@@ -87,6 +88,52 @@ def test_absolute_autodl_url_sends_autodl_headers() -> None:
         "authorization": "fake-token",
         "app_version": "v6.53.0",
     }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://autodl.com/api/v1/example",
+        "https://www.autodl.com/api/v1/example",
+        "https://region-1.autodl.com/api/v1/example",
+    ],
+)
+def test_every_autodl_com_host_receives_autodl_headers(url: str) -> None:
+    """The apex domain and all of its subdomains receive AutoDL headers."""
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        return httpx.Response(200, json={})
+
+    with _client(handler) as client:
+        tools.send_request(client, "GET", url)
+
+    assert seen == {"url": url, "authorization": "fake-token", "app_version": "v6.53.0"}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://autodl.com.example.org/api/v1/example",
+        "https://notautodl.com/api/v1/example",
+    ],
+)
+def test_lookalike_hosts_never_receive_autodl_headers(url: str) -> None:
+    """A host that merely resembles AutoDL is treated as external."""
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        return httpx.Response(200, json={})
+
+    with _client(handler) as client:
+        tools.send_request(client, "GET", url)
+
+    assert seen == {"authorization": None, "app_version": None}
 
 
 def test_json_data_is_sent_as_json() -> None:

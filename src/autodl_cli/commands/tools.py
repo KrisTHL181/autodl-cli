@@ -1,9 +1,9 @@
 """``autodl tools`` — general-purpose utility commands.
 
 ``request`` sends a raw HTTP request to any URL — the stored token and the
-mandatory ``AppVersion`` header are attached only when the target stays on the
-AutoDL origin — or prints an equivalent curl command. ``snipe`` watches GPU
-stock and orders the first matching machine.
+mandatory ``AppVersion`` header are attached only when the target is an
+``autodl.com`` host — or prints an equivalent curl command. ``snipe`` watches
+GPU stock and orders the first matching machine.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Raw-request helpers behind ``autodl tools request``.
 
 The handler resolves the target URL, attaches AutoDL credentials only when the
-request stays on the AutoDL origin, and returns the response as plain data.
+request targets an ``autodl.com`` host, and returns the response as plain data.
 It never writes to the terminal; :mod:`autodl_cli.commands.tools` and
 :mod:`autodl_cli.output` own all rendering.
 """
@@ -21,18 +21,39 @@ if TYPE_CHECKING:
 #: Response headers that must not be copied into a generated curl command.
 _SKIP_CURL_HEADERS = frozenset({"accept-encoding", "content-length", "host"})
 
+#: Apex domain whose hosts all receive AutoDL credentials.
+_AUTODL_DOMAIN = "autodl.com"
+
+
+def _is_autodl_host(host: str | None) -> bool:
+    """Return whether ``host`` belongs to the AutoDL domain.
+
+    Any ``autodl.com`` host is accepted, including the apex domain and every
+    subdomain such as ``www.autodl.com`` or ``region-1.autodl.com``. A host
+    that merely ends with the same characters (``autodl.com.example.org``) is
+    not.
+
+    :param host: Host name from a parsed URL, or ``None``.
+    :returns: ``True`` when the host is on the AutoDL domain.
+    """
+    if not host:
+        return False
+    host = host.lower()
+    return host == _AUTODL_DOMAIN or host.endswith(f".{_AUTODL_DOMAIN}")
+
 
 def resolve_url(url: str, base_url: str) -> tuple[str, bool]:
     """Resolve a user-supplied URL against the AutoDL base URL.
 
     Absolute ``http`` and ``https`` URLs are sent as-is. Anything else is
     treated as a path and appended to ``base_url``. The boolean tells the
-    caller whether the resolved URL shares the base URL's origin, which is the
-    only case where AutoDL credentials may be attached.
+    caller whether the resolved URL points at AutoDL — any ``autodl.com`` host,
+    or the base URL's own origin — which is the only case where AutoDL
+    credentials may be attached.
 
     :param url: URL or path from the command line.
     :param base_url: AutoDL API root.
-    :returns: The resolved URL and whether it is on the AutoDL origin.
+    :returns: The resolved URL and whether it is an AutoDL host.
     """
     parsed = urlparse(url)
     if parsed.scheme in ("http", "https"):
@@ -40,9 +61,10 @@ def resolve_url(url: str, base_url: str) -> tuple[str, bool]:
     else:
         resolved = f"{base_url.rstrip('/')}/{url.lstrip('/')}"
 
-    resolved_origin = urlparse(resolved)
-    base_origin = urlparse(base_url)
-    on_autodl = (resolved_origin.scheme, resolved_origin.netloc) == (base_origin.scheme, base_origin.netloc)
+    resolved_url = urlparse(resolved)
+    base_url_parsed = urlparse(base_url)
+    same_origin = (resolved_url.scheme, resolved_url.netloc) == (base_url_parsed.scheme, base_url_parsed.netloc)
+    on_autodl = same_origin or _is_autodl_host(resolved_url.hostname)
     return resolved, on_autodl
 
 
@@ -70,7 +92,7 @@ def send_request(
 
     ``data`` is sent as JSON when it parses as JSON, otherwise as raw form
     content. AutoDL credentials and the ``AppVersion`` header are attached only
-    when the resolved URL stays on the AutoDL origin.
+    when the resolved URL targets an ``autodl.com`` host.
 
     :param client: Client used to send the request.
     :param method: HTTP method.
