@@ -1787,3 +1787,306 @@ def test_clone_value_error_is_a_clean_click_exception(home: Path, monkeypatch) -
     assert result.exit_code == 1
     assert "instance_uuid must not be empty" in result.output
     assert "Traceback" not in result.output
+
+
+SCHEDULE_INSTANCE_UUID = "9b384da211-e57974ef"
+SHUTDOWN_WIRE_TIME = "2026-11-13 00:00"
+
+
+def test_schedule_shutdown_at_parses_naive_time_as_beijing(home: Path, monkeypatch) -> None:
+    """``--at`` without an offset reaches the handler as UTC+8."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
+        captured["instance_id"] = instance_id
+        captured["shutdown_at"] = shutdown_at
+        return {
+            "instance_uuid": instance_id,
+            "shutdown_at": shutdown_at.strftime("%Y-%m-%d %H:%M"),
+        }
+
+    monkeypatch.setattr(instance_commands.instance_handler, "schedule_shutdown", fake_schedule_shutdown)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-13 00:00"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["instance_id"] == SCHEDULE_INSTANCE_UUID
+    assert captured["shutdown_at"].isoformat() == "2026-11-13T00:00:00+08:00"
+    assert json.loads(result.output) == {
+        "instance_uuid": SCHEDULE_INSTANCE_UUID,
+        "shutdown_at": SHUTDOWN_WIRE_TIME,
+    }
+    assert TOKEN not in result.output
+
+
+def test_schedule_shutdown_at_with_offset_converts_to_utc_plus_8(home: Path, monkeypatch) -> None:
+    """An explicit offset is converted to Beijing time before reaching the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
+        captured["shutdown_at"] = shutdown_at
+        return {
+            "instance_uuid": instance_id,
+            "shutdown_at": shutdown_at.strftime("%Y-%m-%d %H:%M"),
+        }
+
+    monkeypatch.setattr(instance_commands.instance_handler, "schedule_shutdown", fake_schedule_shutdown)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-12T18:00:00Z"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["shutdown_at"].isoformat() == "2026-11-13T02:00:00+08:00"
+    assert json.loads(result.output)["shutdown_at"] == "2026-11-13 02:00"
+
+
+def test_schedule_shutdown_in_uses_the_frozen_clock(home: Path, monkeypatch) -> None:
+    """``--in 90m`` adds 90 minutes to the monkeypatched Beijing clock."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        instance_commands,
+        "_now_beijing",
+        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
+        captured["shutdown_at"] = shutdown_at
+        return {
+            "instance_uuid": instance_id,
+            "shutdown_at": shutdown_at.strftime("%Y-%m-%d %H:%M"),
+        }
+
+    monkeypatch.setattr(instance_commands.instance_handler, "schedule_shutdown", fake_schedule_shutdown)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--in", "90m"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["shutdown_at"].isoformat() == "2026-11-12T11:30:00+08:00"
+    assert f"Scheduled shutdown for instance {SCHEDULE_INSTANCE_UUID} at 2026-11-12 11:30 (UTC+8)." in result.output
+
+
+def test_schedule_shutdown_rerun_modifies_the_time(home: Path, monkeypatch) -> None:
+    """Running the command again is the documented way to change the schedule."""
+    _seed_token()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        instance_commands,
+        "_now_beijing",
+        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
+        calls.append(shutdown_at.strftime("%Y-%m-%d %H:%M"))
+        return {"instance_uuid": instance_id, "shutdown_at": calls[-1]}
+
+    monkeypatch.setattr(instance_commands.instance_handler, "schedule_shutdown", fake_schedule_shutdown)
+
+    first = CliRunner().invoke(
+        main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-13 00:00"]
+    )
+    second = CliRunner().invoke(main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--in", "2h"])
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert calls == ["2026-11-13 00:00", "2026-11-12 12:00"]
+
+
+def test_schedule_shutdown_requires_exactly_one_time_option(home: Path, monkeypatch) -> None:
+    """Neither or both of ``--at``/``--in`` is a clean error."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "schedule_shutdown",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without exactly one time option"),
+    )
+
+    missing = CliRunner().invoke(main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID])
+    both = CliRunner().invoke(
+        main,
+        ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-13 00:00", "--in", "1h"],
+    )
+
+    for result in (missing, both):
+        assert result.exit_code == 1
+        assert "Pass exactly one of --at and --in." in result.output
+        assert "Traceback" not in result.output
+
+
+def test_schedule_shutdown_rejects_past_time(home: Path, monkeypatch) -> None:
+    """An ``--at`` in the past is a clean error."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands,
+        "_now_beijing",
+        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "schedule_shutdown",
+        lambda *args, **kwargs: pytest.fail("the handler must not run for a past time"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-11 10:00"],
+    )
+
+    assert result.exit_code == 1
+    assert "--at must be in the future" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_schedule_shutdown_rejects_invalid_values(home: Path, monkeypatch) -> None:
+    """Malformed ``--at`` and ``--in`` values are clean errors."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "schedule_shutdown",
+        lambda *args, **kwargs: pytest.fail("the handler must not run for invalid input"),
+    )
+
+    bad_at = CliRunner().invoke(main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "tomorrow"])
+    bad_in = CliRunner().invoke(main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--in", "soon"])
+    zero_in = CliRunner().invoke(main, ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--in", "0m"])
+
+    for result in (bad_at, bad_in, zero_in):
+        assert result.exit_code == 1
+        assert "Traceback" not in result.output
+    assert "Invalid --at" in bad_at.output
+    assert "Invalid --in" in bad_in.output
+    assert "--in must be positive" in zero_in.output
+
+
+def test_schedule_shutdown_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands,
+        "_now_beijing",
+        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "schedule_shutdown",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-13 00:00"],
+    )
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_schedule_shutdown_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands,
+        "_now_beijing",
+        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+
+    def failing_schedule_shutdown(client, instance_id, *, shutdown_at):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "schedule_shutdown", failing_schedule_shutdown)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "schedule-shutdown", SCHEDULE_INSTANCE_UUID, "--at", "2026-11-13 00:00"],
+    )
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cancel_shutdown_forwards_instance_and_returns_json(home: Path, monkeypatch) -> None:
+    """The UUID reaches the handler and JSON is passed through, without a prompt."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {"instance_uuid": SCHEDULE_INSTANCE_UUID, "shutdown_scheduled": False}
+
+    def fake_cancel_scheduled_shutdown(client, instance_id):
+        captured["instance_id"] = instance_id
+        return record
+
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "cancel_scheduled_shutdown",
+        fake_cancel_scheduled_shutdown,
+    )
+
+    result = CliRunner().invoke(main, ["--json", "instance", "cancel-shutdown", SCHEDULE_INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"instance_id": SCHEDULE_INSTANCE_UUID}
+    assert json.loads(result.output) == record
+    assert TOKEN not in result.output
+
+
+def test_cancel_shutdown_human_output_reports_success(home: Path, monkeypatch) -> None:
+    """The human view confirms the cancelled schedule."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "cancel_scheduled_shutdown",
+        lambda client, instance_id: {"instance_uuid": instance_id, "shutdown_scheduled": False},
+    )
+
+    result = CliRunner().invoke(main, ["instance", "cancel-shutdown", SCHEDULE_INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert f"Cancelled the scheduled shutdown for instance {SCHEDULE_INSTANCE_UUID}." in result.output
+    assert TOKEN not in result.output
+
+
+def test_cancel_shutdown_requires_token(home: Path, monkeypatch) -> None:
+    """A missing token fails cleanly with the paste hint."""
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "cancel_scheduled_shutdown",
+        lambda *args, **kwargs: pytest.fail("the handler must not run without a token"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "cancel-shutdown", SCHEDULE_INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "autodl auth paste" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cancel_shutdown_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_cancel_scheduled_shutdown(client, instance_id):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "cancel_scheduled_shutdown",
+        failing_cancel_scheduled_shutdown,
+    )
+
+    result = CliRunner().invoke(main, ["instance", "cancel-shutdown", SCHEDULE_INSTANCE_UUID])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output

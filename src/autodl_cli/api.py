@@ -20,9 +20,11 @@ from autodl_cli.handlers import instance as instance_handler
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from datetime import datetime
 
 __all__ = [
     "AutoDLClient",
+    "cancel_scheduled_shutdown",
     "change_image",
     "clone_instance",
     "create_instance",
@@ -41,6 +43,7 @@ __all__ = [
     "rename_instance",
     "reset_instance",
     "save_image",
+    "schedule_shutdown",
 ]
 
 
@@ -388,6 +391,49 @@ def power_off(token: str, instance_uuid: str) -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return instance_handler.power_off(client, instance_uuid)
+
+
+def schedule_shutdown(
+    token: str,
+    instance_uuid: str,
+    *,
+    shutdown_at: datetime,
+) -> dict[str, object]:
+    """Schedule an instance to shut down automatically at a given time.
+
+    AutoDL accepts the request immediately and answers with a null ``data``
+    payload. A naive ``shutdown_at`` is interpreted as Beijing time (UTC+8); an
+    aware value is converted to UTC+8. Re-running the call with a new time
+    modifies the existing schedule.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :param shutdown_at: Time at which the instance should shut down.
+    :returns: A mapping with ``instance_uuid`` and ``shutdown_at`` (the
+        Beijing-time wire string).
+    :raises ValueError: When ``instance_uuid`` is blank.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.schedule_shutdown(client, instance_uuid, shutdown_at=shutdown_at)
+
+
+def cancel_scheduled_shutdown(token: str, instance_uuid: str) -> dict[str, object]:
+    """Cancel an instance's scheduled automatic shutdown.
+
+    AutoDL accepts the request immediately and answers with a null ``data``
+    payload.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``shutdown_scheduled``.
+    :raises ValueError: When ``instance_uuid`` is blank.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.cancel_scheduled_shutdown(client, instance_uuid)
 
 
 def release_instance(token: str, instance_uuid: str) -> dict[str, object]:

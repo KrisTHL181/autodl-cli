@@ -21,11 +21,16 @@ base image, and asks for confirmation too. ``rename`` sends a
 confirmation. ``release`` posts to
 ``POST /api/v1/instance/release`` and asks for confirmation because it deletes
 the instance and its data disk. ``save-image`` posts to
-``POST /api/v1/instance/image/save``. The remaining lifecycle commands wait for
-their handlers.
+``POST /api/v1/instance/image/save``. ``schedule-shutdown`` and
+``cancel-shutdown`` post to ``POST /api/v1/instance/timed/shutdown`` to set,
+modify, or clear an automatic shutdown time. The remaining lifecycle commands
+wait for their handlers.
 """
 
 from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta
 
 import click
 
@@ -34,6 +39,61 @@ from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import instance as instance_handler
+
+#: Accepted ``--at`` shape: date, ``T``/space, time, optional seconds and offset.
+_AT_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?$")
+
+#: Accepted ``--in`` shape: one or more ``d``/``h``/``m``/``s`` components.
+_DURATION_PATTERN = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def _now_beijing() -> datetime:
+    """Return the current time in Beijing time (UTC+8).
+
+    :returns: A timezone-aware datetime using the fixed UTC+8 offset.
+    """
+    return datetime.now(instance_handler.SHUTDOWN_TIMEZONE)
+
+
+def _parse_at(text: str) -> datetime:
+    """Parse an absolute shutdown time into Beijing time.
+
+    Accepts ``YYYY-MM-DD HH:MM`` and ``YYYY-MM-DDTHH:MM``, optionally with
+    seconds and a UTC offset such as ``+08:00`` or ``Z``. A naive value is
+    interpreted as Beijing time; an aware value is converted to UTC+8.
+
+    :param text: The ``--at`` option value.
+    :returns: A timezone-aware datetime in UTC+8.
+    :raises ValueError: When the text is not a supported timestamp.
+    """
+    value = text.strip()
+    if not _AT_PATTERN.match(value):
+        raise ValueError(f"Invalid --at value {text!r}; use 'YYYY-MM-DD HH:MM'.")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=instance_handler.SHUTDOWN_TIMEZONE)
+    return parsed.astimezone(instance_handler.SHUTDOWN_TIMEZONE)
+
+
+def _parse_duration(text: str) -> timedelta:
+    """Parse a duration such as ``30m``, ``4h``, or ``1d2h``.
+
+    Units are ``d``, ``h``, ``m``, and optionally ``s``. Seconds are rounded up
+    to the next whole minute so the scheduled time keeps minute precision.
+
+    :param text: The ``--in`` option value.
+    :returns: A positive timedelta with whole-minute precision.
+    :raises ValueError: When the text is unsupported or not positive.
+    """
+    value = text.strip().lower()
+    match = _DURATION_PATTERN.match(value)
+    if not match or not any(match.groups()):
+        raise ValueError(f"Invalid --in value {text!r}; use durations like 30m, 4h, or 1d2h.")
+    days, hours, minutes, seconds = (int(part) if part else 0 for part in match.groups())
+    total_seconds = days * 86400 + hours * 3600 + minutes * 60 + seconds
+    if total_seconds <= 0:
+        raise ValueError("--in must be positive")
+    return timedelta(minutes=(total_seconds + 59) // 60)
 
 
 @click.group(help="Manage AutoDL container instances.")
@@ -254,6 +314,108 @@ def power_off_command(ctx: click.Context, instance_uuid: str) -> None:
         return
 
     output.success(f"Power-off requested for instance {result['instance_uuid']}.")
+
+
+@instance.command("schedule-shutdown", help="Schedule an automatic shutdown at a given time.")
+@click.argument("instance_uuid")
+@click.option(
+    "--at",
+    "at_time",
+    default=None,
+    help="Shut down at this time; naive values are Beijing time (UTC+8).",
+)
+@click.option(
+    "--in",
+    "in_duration",
+    default=None,
+    help="Shut down after this duration (e.g. 30m, 4h, 1d2h).",
+)
+@click.pass_context
+def schedule_shutdown_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    at_time: str | None,
+    in_duration: str | None,
+) -> None:
+    """Schedule an instance to shut down automatically at a given time.
+
+    Pass exactly one of ``--at`` (``YYYY-MM-DD HH:MM``, optionally with a UTC
+    offset) and ``--in`` (a duration such as ``30m`` or ``1d2h``). Naive times
+    are Beijing time (UTC+8); an aware time is converted to UTC+8. A time in the
+    past is rejected. Re-running the command with a new time changes the
+    existing schedule. The command does not ask for confirmation.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param at_time: Absolute time to shut down at; ``None`` when ``--in`` is used.
+    :param in_duration: Delay before shutting down; ``None`` when ``--at`` is
+        used.
+    :raises click.ClickException: When neither or both of ``--at`` and ``--in``
+        are given, a value cannot be parsed, or the time is in the past. Also
+        raised when the argument is blank, no token is configured, or the API
+        call fails.
+    """
+    if (at_time is None) == (in_duration is None):
+        raise click.ClickException("Pass exactly one of --at and --in.")
+
+    try:
+        if at_time is not None:
+            shutdown_at = _parse_at(at_time)
+            if shutdown_at < _now_beijing():
+                raise ValueError("--at must be in the future")
+        else:
+            shutdown_at = _now_beijing() + _parse_duration(in_duration or "")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    config = load_config()
+    token = require_token(config)
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.schedule_shutdown(client, instance_uuid, shutdown_at=shutdown_at)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Scheduled shutdown for instance {result['instance_uuid']} at {result['shutdown_at']} (UTC+8).")
+
+
+@instance.command("cancel-shutdown", help="Cancel an instance's scheduled automatic shutdown.")
+@click.argument("instance_uuid")
+@click.pass_context
+def cancel_shutdown_command(ctx: click.Context, instance_uuid: str) -> None:
+    """Cancel an instance's scheduled automatic shutdown.
+
+    There is no schedule left afterwards. The command does not ask for
+    confirmation.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :raises click.ClickException: When the argument is blank, no token is
+        configured, or the API call fails.
+    """
+    config = load_config()
+    token = require_token(config)
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.cancel_scheduled_shutdown(client, instance_uuid)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.success(f"Cancelled the scheduled shutdown for instance {result['instance_uuid']}.")
 
 
 @instance.command("reset", help="Reset an instance, rebuilding its system disk.")

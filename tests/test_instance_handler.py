@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -540,6 +541,177 @@ def test_power_off_failure_raises_api_error() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(APIError, match="already stopped"):
             instance_handler.power_off(client, POWER_OFF_INSTANCE_UUID)
+
+
+SCHEDULE_INSTANCE_UUID = "sd2f81kqzv-7a35c9e1"
+
+
+def test_schedule_shutdown_posts_expected_body_and_tolerates_null_data() -> None:
+    """The handler trims the UUID, treats naive times as UTC+8, and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.schedule_shutdown(
+            client,
+            f" {SCHEDULE_INSTANCE_UUID} ",
+            shutdown_at=datetime(2026, 11, 13, 0, 0),
+        )
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/instance/timed/shutdown",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {
+            "instance_uuid": SCHEDULE_INSTANCE_UUID,
+            "shutdown_at": "2026-11-13 00:00",
+        },
+    }
+    assert result == {
+        "instance_uuid": SCHEDULE_INSTANCE_UUID,
+        "shutdown_at": "2026-11-13 00:00",
+    }
+
+
+def test_schedule_shutdown_converts_aware_time_to_utc_plus_8() -> None:
+    """An aware time from another offset is converted to Beijing time."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.schedule_shutdown(
+            client,
+            SCHEDULE_INSTANCE_UUID,
+            shutdown_at=datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc),
+        )
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["shutdown_at"] == "2026-11-13 02:00"
+    assert result["shutdown_at"] == "2026-11-13 02:00"
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_schedule_shutdown_rejects_blank_instance_id(instance_id: str) -> None:
+    """A blank UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_id must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.schedule_shutdown(
+                client,
+                instance_id,
+                shutdown_at=datetime(2026, 11, 13, 0, 0),
+            )
+
+
+def test_schedule_shutdown_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-16"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.schedule_shutdown(
+                client,
+                SCHEDULE_INSTANCE_UUID,
+                shutdown_at=datetime(2026, 11, 13, 0, 0),
+            )
+
+
+def test_schedule_shutdown_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "InstanceNotFound", "msg": "no such instance", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no such instance"):
+            instance_handler.schedule_shutdown(
+                client,
+                SCHEDULE_INSTANCE_UUID,
+                shutdown_at=datetime(2026, 11, 13, 0, 0),
+            )
+
+
+def test_cancel_scheduled_shutdown_posts_null_body_and_tolerates_null_data() -> None:
+    """Cancelling sends JSON null for ``shutdown_at`` and ignores null data."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["app_version"] = request.headers.get("AppVersion")
+        seen["body"] = json.loads(request.content)
+        seen["content"] = request.content
+        return _success(None)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.cancel_scheduled_shutdown(client, f" {SCHEDULE_INSTANCE_UUID} ")
+
+    assert b'"shutdown_at":null' in seen.pop("content")
+
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/instance/timed/shutdown",
+        "authorization": TOKEN,
+        "app_version": APP_VERSION,
+        "body": {
+            "instance_uuid": SCHEDULE_INSTANCE_UUID,
+            "shutdown_at": None,
+        },
+    }
+    assert result == {
+        "instance_uuid": SCHEDULE_INSTANCE_UUID,
+        "shutdown_scheduled": False,
+    }
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_cancel_scheduled_shutdown_rejects_blank_instance_id(instance_id: str) -> None:
+    """A blank UUID fails before any request is sent."""
+    with pytest.raises(ValueError, match="instance_id must not be empty"):
+        with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
+            instance_handler.cancel_scheduled_shutdown(client, instance_id)
+
+
+def test_cancel_scheduled_shutdown_auth_failure_raises_auth_error() -> None:
+    """An ``AuthorizeFailed`` envelope becomes an :class:`AuthError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": "AuthorizeFailed", "msg": "login timed out", "data": None, "request_id": "req-17"},
+        )
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="login timed out"):
+            instance_handler.cancel_scheduled_shutdown(client, SCHEDULE_INSTANCE_UUID)
+
+
+def test_cancel_scheduled_shutdown_failure_raises_api_error() -> None:
+    """A non-success envelope becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": "InstanceNotFound", "msg": "no such instance", "data": None})
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="no such instance"):
+            instance_handler.cancel_scheduled_shutdown(client, SCHEDULE_INSTANCE_UUID)
 
 
 RESET_INSTANCE_UUID = "rs5tb83nqk-2e71a4c9"

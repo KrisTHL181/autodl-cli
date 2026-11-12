@@ -204,6 +204,9 @@ autodl instance detail <instance-uuid>
 autodl instance power-on <instance-uuid>
 autodl instance power-on <instance-uuid> --non-gpu
 autodl instance power-off <instance-uuid>
+autodl instance schedule-shutdown <instance-uuid> --at "2026-11-13 00:00"
+autodl instance schedule-shutdown <instance-uuid> --in 4h
+autodl instance cancel-shutdown <instance-uuid>
 autodl instance reset <instance-uuid>
 autodl instance reset <instance-uuid> --yes
 autodl instance change-image <instance-uuid> base-image-ec1e9vdbd3
@@ -241,6 +244,15 @@ immediately; it is irreversible, so the command asks for confirmation unless
 `--yes` is passed. `save-image` posts to
 `/api/v1/instance/image/save`; AutoDL accepts the request immediately, and the
 image appears under the account's private images once the save finishes.
+
+`schedule-shutdown` posts to `/api/v1/instance/timed/shutdown` to power the
+instance off automatically later. Pass exactly one of `--at` (an absolute time
+such as `"2026-11-13 00:00"`) and `--in` (a duration such as `30m`, `4h`, or
+`1d2h`). Times are Beijing time (UTC+8); a naive `--at` value is read as UTC+8,
+while an explicit offset such as `+08:00` or `Z` is converted to it. A time in
+the past is rejected. Re-run the command with a new `--at` or `--in` to change
+the scheduled time. `cancel-shutdown` clears the schedule. `instance list`
+shows a pending stop as `Stop YYYY-MM-DD`.
 
 `create` posts to `/api/v1/order/instance/create/payg` and orders a
 pay-as-you-go instance. Pass either `--machine-id` or both `--region` and

@@ -63,6 +63,7 @@ response's ``data`` is the new instance UUID string.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
@@ -92,6 +93,12 @@ POWER_ON_NON_GPU_PAYLOAD = "non_gpu"
 
 #: Path of the power-off endpoint.
 INSTANCE_POWER_OFF_PATH = "/api/v1/instance/power_off"
+
+#: Path of the scheduled auto-shutdown endpoint (also used to cancel/modify).
+INSTANCE_TIMED_SHUTDOWN_PATH = "/api/v1/instance/timed/shutdown"
+
+#: Fixed UTC+8 offset used for scheduled-shutdown times (China has no DST).
+SHUTDOWN_TIMEZONE = timezone(timedelta(hours=8))
 
 #: Path of the release endpoint.
 INSTANCE_RELEASE_PATH = "/api/v1/instance/release"
@@ -730,6 +737,82 @@ def power_off(client: AutoDLClient, instance_id: str) -> dict[str, object]:
     return {
         "instance_uuid": instance_uuid,
         "powered_off": True,
+    }
+
+
+def schedule_shutdown(client: AutoDLClient, instance_id: str, *, shutdown_at: datetime) -> dict[str, object]:
+    """Schedule an instance to shut down automatically at a given time.
+
+    ``POST /api/v1/instance/timed/shutdown`` accepts a non-null
+    ``shutdown_at`` as a naive Beijing-time string in ``"%Y-%m-%d %H:%M"``
+    format and answers with ``"data": null`` on success, so success is
+    signalled by the envelope's ``code`` alone. Re-running the request with a
+    new time modifies the existing schedule; no separate endpoint is needed.
+
+    A naive ``shutdown_at`` is interpreted as Beijing time (UTC+8). An aware
+    value is converted to UTC+8 before formatting.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :param shutdown_at: Time at which the instance should shut down.
+    :returns: A mapping with ``instance_uuid`` and ``shutdown_at`` (the
+        Beijing-time wire string).
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    if shutdown_at.tzinfo is None:
+        local_time = shutdown_at.replace(tzinfo=SHUTDOWN_TIMEZONE)
+    else:
+        local_time = shutdown_at.astimezone(SHUTDOWN_TIMEZONE)
+    wire_time = local_time.strftime("%Y-%m-%d %H:%M")
+
+    body: dict[str, object] = {
+        "instance_uuid": instance_uuid,
+        "shutdown_at": wire_time,
+    }
+    payload = client.request("POST", INSTANCE_TIMED_SHUTDOWN_PATH, json=body)
+    require_success_any(payload, action="schedule instance shutdown")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "shutdown_at": wire_time,
+    }
+
+
+def cancel_scheduled_shutdown(client: AutoDLClient, instance_id: str) -> dict[str, object]:
+    """Cancel an instance's scheduled automatic shutdown.
+
+    ``POST /api/v1/instance/timed/shutdown`` cancels the schedule when
+    ``shutdown_at`` is JSON null and answers with ``"data": null`` on success,
+    so success is signalled by the envelope's ``code`` alone.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :returns: A mapping with ``instance_uuid`` and ``shutdown_scheduled``
+        (always ``False``).
+    :raises ValueError: When ``instance_id`` is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure.
+    """
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+
+    body: dict[str, object] = {
+        "instance_uuid": instance_uuid,
+        "shutdown_at": None,
+    }
+    payload = client.request("POST", INSTANCE_TIMED_SHUTDOWN_PATH, json=body)
+    require_success_any(payload, action="cancel scheduled instance shutdown")
+
+    return {
+        "instance_uuid": instance_uuid,
+        "shutdown_scheduled": False,
     }
 
 
