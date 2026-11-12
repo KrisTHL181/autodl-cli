@@ -4,14 +4,19 @@ The wallet balance lives behind ``GET /api/v1/wallet/balance`` and the account
 profile behind ``GET /api/v1/user/detail``. AutoDL returns money values in a
 smaller integer unit; :func:`get_balance` converts every monetary field to a
 yuan float, so callers never have to handle it.
+
+Billing usage lives behind ``GET /api/v1/billing/statistic``. Unlike the wallet
+endpoints, it reports money as decimal strings that are already in yuan, so
+:func:`get_usage_statistics` converts them to floats without applying the
+milliyuan unit.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from autodl_cli.errors import AuthError
-from autodl_cli.handlers._common import require_success
+from autodl_cli.errors import APIError, AuthError
+from autodl_cli.handlers._common import require_success, require_success_list
 from autodl_cli.money import BALANCE_MONEY_FIELDS, to_yuan
 
 if TYPE_CHECKING:
@@ -22,6 +27,20 @@ WALLET_BALANCE_PATH = "/api/v1/wallet/balance"
 
 #: Path of the account profile endpoint.
 USER_DETAIL_PATH = "/api/v1/user/detail"
+
+#: Path of the billing-statistic endpoint used by ``account usage``.
+BILLING_STATISTIC_PATH = "/api/v1/billing/statistic"
+
+#: Granularities accepted by the billing-statistic endpoint.
+USAGE_GRANULARITIES = ("monthly", "daily")
+
+#: Billing-statistic fields reported as decimal yuan strings.
+USAGE_MONEY_FIELDS = (
+    "asset_sum",
+    "pay_by_balance_sum",
+    "pay_by_voucher_sum",
+    "refund_asset_sum",
+)
 
 
 def get_balance(client: AutoDLClient, *, charge_type: str = "payg") -> dict[str, object]:
@@ -45,6 +64,80 @@ def get_balance(client: AutoDLClient, *, charge_type: str = "payg") -> dict[str,
         if field in converted:
             converted[field] = to_yuan(converted[field])
     return converted
+
+
+def _to_yuan_float(value: object) -> object:
+    """Convert a billing-statistic money value to a float.
+
+    The endpoint reports money as decimal strings that are already in yuan, so
+    no milliyuan conversion applies. Missing, ``None``, and non-numeric values
+    are returned unchanged instead of failing the whole request.
+
+    :param value: Raw money field from one billing-statistic entry.
+    :returns: A float when the value is numeric, otherwise the value unchanged.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
+
+
+def get_usage_statistics(
+    client: AutoDLClient,
+    *,
+    granularity: str = "monthly",
+    sub_name: str = "",
+    exclude_sub_user: bool = False,
+) -> list[dict[str, object]]:
+    """Return billing usage statistics for the account.
+
+    ``time_granularity`` controls the bucket size: ``"monthly"`` reports
+    roughly the last twelve months and ``"daily"`` roughly the last fourteen
+    days, in ascending date order.
+
+    :param client: Authenticated API client.
+    :param granularity: ``"monthly"`` or ``"daily"``.
+    :param sub_name: Sub-user name to filter by; an empty string means every
+        sub-user.
+    :param exclude_sub_user: Whether to exclude sub-user transactions.
+    :returns: One mapping per period. The four money fields in
+        :data:`USAGE_MONEY_FIELDS` are yuan floats; ``report_date`` and
+        ``transaction_count`` are returned unchanged.
+    :raises ValueError: When ``granularity`` is not supported.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports any other failure
+        or returns malformed data.
+    """
+    if granularity not in USAGE_GRANULARITIES:
+        raise ValueError(f"granularity must be one of {', '.join(USAGE_GRANULARITIES)}")
+
+    payload = client.request(
+        "GET",
+        BILLING_STATISTIC_PATH,
+        params={
+            "time_granularity": granularity,
+            "sub_name": sub_name,
+            "exclude_sub_user": exclude_sub_user,
+        },
+    )
+    entries = require_success_list(payload, action="usage statistics")
+
+    statistics: list[dict[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise APIError("AutoDL usage statistics returned malformed data")
+        converted = dict(entry)
+        for field in USAGE_MONEY_FIELDS:
+            if field in converted:
+                converted[field] = _to_yuan_float(converted[field])
+        statistics.append(converted)
+    return statistics
 
 
 def get_me(client: AutoDLClient) -> dict[str, object]:

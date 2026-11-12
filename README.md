@@ -81,14 +81,19 @@ autodl account balance     # how much credit is left?
 
 ### 👤 Account
 
-Inspect the authenticated profile and wallet. Both the table and `--json`
-report money values in yuan, using the API's field names (for example
-`assets` and `payg_price`).
+Inspect the authenticated profile, wallet, and billing usage. The tables and
+`--json` report money values in yuan, using the API's field names (for example
+`assets` and `payg_price`). `account usage` breaks spend down by month or day
+and can filter by sub-user.
 
 ```bash
 autodl account me
 autodl account balance
 autodl account balance --charge-type payg
+autodl account usage
+autodl account usage --granularity daily
+autodl account usage --sub-name alice
+autodl account usage --exclude-sub-user
 ```
 
 ### 🎮 GPU Capacity

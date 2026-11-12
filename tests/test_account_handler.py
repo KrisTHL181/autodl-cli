@@ -53,13 +53,34 @@ ACCOUNT = {
     "private_image_num": 20,
 }
 
+USAGE = [
+    {
+        "asset_sum": "78.59",
+        "refund_asset_sum": "0.00",
+        "pay_by_balance_sum": "78.59",
+        "pay_by_voucher_sum": "0.00",
+        "report_date": "2025-12",
+        "transaction_count": 83,
+    },
+]
+USAGE_YUAN = [
+    {
+        "asset_sum": 78.59,
+        "refund_asset_sum": 0.0,
+        "pay_by_balance_sum": 78.59,
+        "pay_by_voucher_sum": 0.0,
+        "report_date": "2025-12",
+        "transaction_count": 83,
+    },
+]
+
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def _success(data: dict[str, object]) -> httpx.Response:
+def _success(data: object) -> httpx.Response:
     """Build a successful API envelope.
 
-    :param data: The ``data`` object to wrap.
+    :param data: The ``data`` value to wrap.
     :returns: A mock HTTP response.
     """
     return httpx.Response(200, json={"code": "Success", "msg": "", "data": data, "request_id": "req-1"})
@@ -200,5 +221,106 @@ def test_get_balance_malformed_data_raises_api_error() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(APIError) as excinfo:
             account_handler.get_balance(client)
+
+    assert "malformed data" in str(excinfo.value)
+
+
+def test_get_usage_statistics_requests_monthly_statistics() -> None:
+    """The handler sends the monthly statistics query and converts money to floats."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        seen["authorization"] = request.headers.get("Authorization")
+        return _success(USAGE)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        assert account_handler.get_usage_statistics(client) == USAGE_YUAN
+
+    assert seen == {
+        "method": "GET",
+        "path": "/api/v1/billing/statistic",
+        "params": {
+            "time_granularity": "monthly",
+            "sub_name": "",
+            "exclude_sub_user": "false",
+        },
+        "authorization": TOKEN,
+    }
+
+
+def test_get_usage_statistics_forwards_daily_and_filters() -> None:
+    """The daily granularity and sub-user filters reach the query string."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return _success(USAGE)
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        account_handler.get_usage_statistics(
+            client,
+            granularity="daily",
+            sub_name="alice",
+            exclude_sub_user=True,
+        )
+
+    assert seen == {
+        "time_granularity": "daily",
+        "sub_name": "alice",
+        "exclude_sub_user": "true",
+    }
+
+
+def test_get_usage_statistics_rejects_unknown_granularity() -> None:
+    """An unsupported granularity fails before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("the API must not be called for an invalid granularity")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError) as excinfo:
+            account_handler.get_usage_statistics(client, granularity="weekly")
+
+    assert "monthly" in str(excinfo.value)
+    assert "daily" in str(excinfo.value)
+
+
+def test_get_usage_statistics_tolerates_missing_or_non_numeric_money() -> None:
+    """Missing, ``None``, and non-numeric money values are left untouched."""
+    entry = {
+        "asset_sum": "12.50",
+        "pay_by_balance_sum": None,
+        "pay_by_voucher_sum": "not-a-number",
+        "report_date": "2025-11",
+        "transaction_count": 3,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success([entry])
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        assert account_handler.get_usage_statistics(client) == [
+            {
+                "asset_sum": 12.5,
+                "pay_by_balance_sum": None,
+                "pay_by_voucher_sum": "not-a-number",
+                "report_date": "2025-11",
+                "transaction_count": 3,
+            }
+        ]
+
+
+def test_get_usage_statistics_malformed_entry_raises_api_error() -> None:
+    """A successful envelope whose list holds a non-object entry is malformed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(["not-an-object"])
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError) as excinfo:
+            account_handler.get_usage_statistics(client)
 
     assert "malformed data" in str(excinfo.value)

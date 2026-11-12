@@ -1,8 +1,9 @@
 """``autodl account`` — account-level commands.
 
-Exposes the authenticated account profile and the wallet balance. The balance
-handler already converts AutoDL's money values to yuan, so both the
-human-readable view and ``--json`` report yuan with the API's field names.
+Exposes the authenticated account profile, the wallet balance, and billing
+usage statistics. The handlers already convert AutoDL's money values to yuan,
+so both the human-readable view and ``--json`` report yuan with the API's field
+names.
 """
 
 from __future__ import annotations
@@ -51,6 +52,58 @@ def balance(ctx: click.Context, charge_type: str) -> None:
         return
 
     output.render_balance(result, charge_type=charge_type)
+
+
+@account.command("usage", help="Show billing usage statistics.")
+@click.option(
+    "-g",
+    "--granularity",
+    type=click.Choice(["monthly", "daily"]),
+    default="monthly",
+    show_default=True,
+    help="Bucket size of the reported periods.",
+)
+@click.option(
+    "--sub-name",
+    default="",
+    help="Only include this sub-user; empty means every sub-user.",
+)
+@click.option(
+    "--exclude-sub-user",
+    is_flag=True,
+    default=False,
+    help="Exclude sub-user transactions.",
+)
+@click.pass_context
+def usage(ctx: click.Context, granularity: str, sub_name: str, exclude_sub_user: bool) -> None:
+    """Show billing usage statistics.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param granularity: ``monthly`` or ``daily`` reporting bucket.
+    :param sub_name: Sub-user name to filter by; empty means every sub-user.
+    :param exclude_sub_user: Whether to exclude sub-user transactions.
+    :raises click.ClickException: When no token is configured or the API call
+        fails.
+    """
+    config = load_config()
+    token = require_token(config)
+
+    try:
+        with build_client(token, config) as client:
+            result = account_handler.get_usage_statistics(
+                client,
+                granularity=granularity,
+                sub_name=sub_name,
+                exclude_sub_user=exclude_sub_user,
+            )
+    except AutoDLError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if ctx.obj and ctx.obj.get("json"):
+        output.render_json(result)
+        return
+
+    output.render_usage(result, granularity=granularity)
 
 
 @account.command("me", help="Show the authenticated account profile.")

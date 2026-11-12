@@ -24,6 +24,24 @@ BALANCE = {
     "certain_conditions_voucher_balance": 0.0,
     "total_recharge_asset": 500.0,
 }
+USAGE = [
+    {
+        "asset_sum": 78.59,
+        "pay_by_balance_sum": 78.59,
+        "pay_by_voucher_sum": 0.0,
+        "refund_asset_sum": 0.0,
+        "report_date": "2025-12",
+        "transaction_count": 83,
+    },
+    {
+        "asset_sum": 12.5,
+        "pay_by_balance_sum": 10.0,
+        "pay_by_voucher_sum": 2.5,
+        "refund_asset_sum": 0.0,
+        "report_date": "2026-01",
+        "transaction_count": 1,
+    },
+]
 ACCOUNT = {
     "id": 751375,
     "username": "tester",
@@ -134,6 +152,88 @@ def test_balance_api_failure_is_a_clean_click_exception(home: Path, monkeypatch)
     monkeypatch.setattr(account_commands.account_handler, "get_balance", failing_get_balance)
 
     result = CliRunner().invoke(main, ["--json", "account", "balance"])
+
+    assert result.exit_code == 1
+    assert "token expired" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_usage_json_returns_normalised_floats(home: Path, monkeypatch) -> None:
+    """``--json`` emits the handler's normalised usage entries."""
+    _seed_token()
+    monkeypatch.setattr(
+        account_commands.account_handler,
+        "get_usage_statistics",
+        lambda client, *, granularity, sub_name, exclude_sub_user: USAGE,
+    )
+
+    result = CliRunner().invoke(main, ["--json", "account", "usage"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == USAGE
+    assert TOKEN not in result.output
+
+
+def test_usage_human_output_shows_periods_and_total(home: Path, monkeypatch) -> None:
+    """The table shows each period and a summed Total row."""
+    _seed_token()
+    monkeypatch.setattr(
+        account_commands.account_handler,
+        "get_usage_statistics",
+        lambda client, *, granularity, sub_name, exclude_sub_user: USAGE,
+    )
+
+    result = CliRunner().invoke(main, ["account", "usage"])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage (monthly)" in result.output
+    assert "2025-12" in result.output
+    assert "2026-01" in result.output
+    assert "Total" in result.output
+    assert "¥78.590" in result.output
+    assert "¥91.090" in result.output
+    assert "84" in result.output
+    assert TOKEN not in result.output
+
+
+def test_usage_forwards_options(home: Path, monkeypatch) -> None:
+    """Granularity and sub-user filters reach the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_get_usage_statistics(client, *, granularity, sub_name, exclude_sub_user):
+        captured.update(
+            granularity=granularity,
+            sub_name=sub_name,
+            exclude_sub_user=exclude_sub_user,
+        )
+        return USAGE
+
+    monkeypatch.setattr(account_commands.account_handler, "get_usage_statistics", fake_get_usage_statistics)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "account", "usage", "-g", "daily", "--sub-name", "alice", "--exclude-sub-user"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "granularity": "daily",
+        "sub_name": "alice",
+        "exclude_sub_user": True,
+    }
+
+
+def test_usage_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """An API failure exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_get_usage_statistics(client, *, granularity, sub_name, exclude_sub_user):
+        raise AuthError("token expired")
+
+    monkeypatch.setattr(account_commands.account_handler, "get_usage_statistics", failing_get_usage_statistics)
+
+    result = CliRunner().invoke(main, ["--json", "account", "usage"])
 
     assert result.exit_code == 1
     assert "token expired" in result.output

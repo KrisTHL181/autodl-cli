@@ -250,6 +250,67 @@ def render_balance(balance: dict[str, object], *, charge_type: str | None = None
     console.print(table)
 
 
+#: Billing-statistic money fields shown by :func:`render_usage`.
+_USAGE_MONEY_FIELDS: tuple[str, ...] = (
+    "asset_sum",
+    "pay_by_balance_sum",
+    "pay_by_voucher_sum",
+    "refund_asset_sum",
+)
+
+#: Column headers for :data:`_USAGE_MONEY_FIELDS`, in the same order.
+_USAGE_MONEY_HEADERS: tuple[str, ...] = ("Total", "Balance", "Voucher", "Refund")
+
+
+def render_usage(entries: Sequence[dict[str, object]], *, granularity: str) -> None:
+    """Render billing usage statistics as a Rich table.
+
+    Money values arrive from the handler as yuan floats; ``--json`` callers
+    receive the same normalised values. A final ``Total`` row sums the money
+    columns and the transaction counts.
+
+    :param entries: Period mappings returned by
+        :func:`autodl_cli.handlers.account.get_usage_statistics`.
+    :param granularity: ``monthly`` or ``daily``, shown in the table title.
+    """
+    title = f"Usage ({granularity})"
+    if not entries:
+        console.print(f"{title}: no data returned.", style=_STYLE_META)
+        return
+
+    table = _table(title)
+    table.add_column("Period", no_wrap=True)
+    for header in _USAGE_MONEY_HEADERS:
+        table.add_column(header, justify="right")
+    table.add_column("Txns", justify="right")
+
+    money_totals = [0.0] * len(_USAGE_MONEY_FIELDS)
+    transaction_total = 0
+    for entry in entries:
+        table.add_row(
+            _value_cell(entry.get("report_date"), _STYLE_COLUMN),
+            *(_value_cell(_format_yuan(entry.get(field)), _STYLE_MONEY) for field in _USAGE_MONEY_FIELDS),
+            _count_cell(entry.get("transaction_count")),
+        )
+
+        for index, field in enumerate(_USAGE_MONEY_FIELDS):
+            value = entry.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                money_totals[index] += float(value)
+
+        transactions = entry.get("transaction_count")
+        if isinstance(transactions, (int, float)) and not isinstance(transactions, bool):
+            transaction_total += transactions
+
+    table.add_section()
+    table.add_row(
+        _styled("Total", _STYLE_LABEL),
+        *(_styled(_format_yuan(total), _STYLE_MONEY) for total in money_totals),
+        _count_cell(transaction_total),
+    )
+    console.print(table)
+
+
 def _format_timestamp(value: object) -> str:
     """Format an ISO 8601 timestamp for display.
 

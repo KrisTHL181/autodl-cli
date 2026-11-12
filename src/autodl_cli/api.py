@@ -30,6 +30,7 @@ __all__ = [
     "get_balance",
     "get_current_user",
     "get_instance",
+    "get_usage_statistics",
     "list_images",
     "list_instances",
     "list_private_images",
@@ -82,6 +83,36 @@ def get_balance(token: str, *, charge_type: str = "payg") -> dict[str, object]:
     """
     with AutoDLClient(token) as client:
         return account_handler.get_balance(client, charge_type=charge_type)
+
+
+def get_usage_statistics(
+    token: str,
+    *,
+    granularity: str = "monthly",
+    sub_name: str = "",
+    exclude_sub_user: bool = False,
+) -> list[dict[str, object]]:
+    """Return billing usage statistics for the account.
+
+    ``monthly`` reports roughly the last twelve months and ``daily`` roughly
+    the last fourteen days, in ascending date order.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param granularity: ``"monthly"`` or ``"daily"``.
+    :param sub_name: Sub-user name to filter by; empty means every sub-user.
+    :param exclude_sub_user: Whether to exclude sub-user transactions.
+    :returns: One mapping per period; the money fields are yuan floats.
+    :raises ValueError: When ``granularity`` is not supported.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return account_handler.get_usage_statistics(
+            client,
+            granularity=granularity,
+            sub_name=sub_name,
+            exclude_sub_user=exclude_sub_user,
+        )
 
 
 def list_images(
