@@ -1791,11 +1791,21 @@ def test_clone_value_error_is_a_clean_click_exception(home: Path, monkeypatch) -
 
 SCHEDULE_INSTANCE_UUID = "9b384da211-e57974ef"
 SHUTDOWN_WIRE_TIME = "2026-11-13 00:00"
+SCHEDULE_NOW = datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+
+
+def _freeze_schedule_clock(monkeypatch) -> None:
+    """Pin the schedule-shutdown clock so fixed ``--at`` values never expire.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    """
+    monkeypatch.setattr(instance_commands, "_now_beijing", lambda: SCHEDULE_NOW)
 
 
 def test_schedule_shutdown_at_parses_naive_time_as_beijing(home: Path, monkeypatch) -> None:
     """``--at`` without an offset reaches the handler as UTC+8."""
     _seed_token()
+    _freeze_schedule_clock(monkeypatch)
     captured: dict[str, object] = {}
 
     def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
@@ -1826,6 +1836,7 @@ def test_schedule_shutdown_at_parses_naive_time_as_beijing(home: Path, monkeypat
 def test_schedule_shutdown_at_with_offset_converts_to_utc_plus_8(home: Path, monkeypatch) -> None:
     """An explicit offset is converted to Beijing time before reaching the handler."""
     _seed_token()
+    _freeze_schedule_clock(monkeypatch)
     captured: dict[str, object] = {}
 
     def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
@@ -1852,11 +1863,7 @@ def test_schedule_shutdown_in_uses_the_frozen_clock(home: Path, monkeypatch) -> 
     _seed_token()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(
-        instance_commands,
-        "_now_beijing",
-        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
-    )
+    _freeze_schedule_clock(monkeypatch)
 
     def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
         captured["shutdown_at"] = shutdown_at
@@ -1882,11 +1889,7 @@ def test_schedule_shutdown_rerun_modifies_the_time(home: Path, monkeypatch) -> N
     _seed_token()
     calls: list[str] = []
 
-    monkeypatch.setattr(
-        instance_commands,
-        "_now_beijing",
-        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
-    )
+    _freeze_schedule_clock(monkeypatch)
 
     def fake_schedule_shutdown(client, instance_id, *, shutdown_at):
         calls.append(shutdown_at.strftime("%Y-%m-%d %H:%M"))
@@ -1928,11 +1931,7 @@ def test_schedule_shutdown_requires_exactly_one_time_option(home: Path, monkeypa
 def test_schedule_shutdown_rejects_past_time(home: Path, monkeypatch) -> None:
     """An ``--at`` in the past is a clean error."""
     _seed_token()
-    monkeypatch.setattr(
-        instance_commands,
-        "_now_beijing",
-        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
-    )
+    _freeze_schedule_clock(monkeypatch)
     monkeypatch.setattr(
         instance_commands.instance_handler,
         "schedule_shutdown",
@@ -1972,11 +1971,7 @@ def test_schedule_shutdown_rejects_invalid_values(home: Path, monkeypatch) -> No
 
 def test_schedule_shutdown_requires_token(home: Path, monkeypatch) -> None:
     """A missing token fails cleanly with the paste hint."""
-    monkeypatch.setattr(
-        instance_commands,
-        "_now_beijing",
-        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
-    )
+    _freeze_schedule_clock(monkeypatch)
     monkeypatch.setattr(
         instance_commands.instance_handler,
         "schedule_shutdown",
@@ -1996,11 +1991,7 @@ def test_schedule_shutdown_requires_token(home: Path, monkeypatch) -> None:
 def test_schedule_shutdown_api_failure_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
     """An API failure exits 1 without a traceback."""
     _seed_token()
-    monkeypatch.setattr(
-        instance_commands,
-        "_now_beijing",
-        lambda: datetime(2026, 11, 12, 10, 0, tzinfo=timezone(timedelta(hours=8))),
-    )
+    _freeze_schedule_clock(monkeypatch)
 
     def failing_schedule_shutdown(client, instance_id, *, shutdown_at):
         raise AuthError("token expired")
