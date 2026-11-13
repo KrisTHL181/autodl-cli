@@ -23,8 +23,9 @@ confirmation. ``release`` posts to
 the instance and its data disk. ``save-image`` posts to
 ``POST /api/v1/instance/image/save``. ``schedule-shutdown`` and
 ``cancel-shutdown`` post to ``POST /api/v1/instance/timed/shutdown`` to set,
-modify, or clear an automatic shutdown time. The remaining lifecycle commands
-wait for their handlers.
+modify, or clear an automatic shutdown time. ``wait`` polls the instance list
+until a target status is reached, and ``power-on``, ``create``, ``clone``, and
+``save-image`` can wait the same way behind ``--wait``.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from autodl_cli import output
 from autodl_cli.commands._helpers import build_client, require_token
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
+from autodl_cli.handlers import image as image_handler
 from autodl_cli.handlers import instance as instance_handler
 
 #: Accepted ``--at`` shape: date, ``T``/space, time, optional seconds and offset.
@@ -94,6 +96,81 @@ def _parse_duration(text: str) -> timedelta:
     if total_seconds <= 0:
         raise ValueError("--in must be positive")
     return timedelta(minutes=(total_seconds + 59) // 60)
+
+
+def _resolve_wait_options(
+    wait_for: bool,
+    interval: float | None,
+    timeout: float | None,
+    retry: int | None,
+) -> tuple[float, float, int] | None:
+    """Validate the shared ``--wait`` tuning options.
+
+    The three tuning options only make sense together with ``--wait``; using
+    any of them alone is a usage error. When waiting, ``None`` falls back to
+    the shared defaults of 10 seconds, no timeout, and no retries.
+
+    :param wait_for: Whether ``--wait`` was passed.
+    :param interval: ``--interval`` value, or ``None`` when not passed.
+    :param timeout: ``--timeout`` value, or ``None`` when not passed.
+    :param retry: ``--retry`` value, or ``None`` when not passed.
+    :returns: The resolved ``(interval, timeout, retry)`` triple when waiting,
+        or ``None`` when ``--wait`` was not passed.
+    :raises click.UsageError: When a tuning option is used without ``--wait``.
+    """
+    if not wait_for:
+        if interval is not None or timeout is not None or retry is not None:
+            raise click.UsageError("--interval/--timeout/--retry require --wait.")
+        return None
+    return (
+        10.0 if interval is None else interval,
+        0.0 if timeout is None else timeout,
+        0 if retry is None else retry,
+    )
+
+
+def _render_wait_event(event: dict[str, object]) -> None:
+    """Render one progress event from a handler wait loop.
+
+    :param event: Event mapping emitted by
+        :func:`autodl_cli.handlers.instance.wait_for_instance` or
+        :func:`autodl_cli.handlers.image.wait_for_private_image`.
+    """
+    kind = event.get("event")
+    if kind == "instance_status":
+        status = event.get("status")
+        if status == "not found":
+            output.info("Instance status: not visible yet.")
+        else:
+            output.info(f"Instance status: {status}.")
+        return
+    if kind == "image_status":
+        name = event.get("name", "")
+        status = event.get("status")
+        line = f"Image {name!r} status: {status}."
+        progress = event.get("progress")
+        if isinstance(progress, dict):
+            percent = progress.get("progress")
+            if isinstance(percent, int) and not isinstance(percent, bool):
+                line = f"Image {name!r} status: {status} ({percent}%)."
+        output.info(line)
+        return
+    if kind == "poll_failed":
+        output.warning(
+            f"Poll failed: {event.get('error', '')}; retrying ({event.get('retries', '')}/{event.get('limit', '')})."
+        )
+        return
+    if kind == "running":
+        output.success(f"Instance {event.get('instance_uuid', '')} is running.")
+        return
+    if kind == "shutdown":
+        output.success(f"Instance {event.get('instance_uuid', '')} is shut down.")
+        return
+    if kind == "released":
+        output.success(f"Instance {event.get('instance_uuid', '')} is released.")
+        return
+    if kind == "finished":
+        output.success(f"Image {event.get('name', '')!r} finished saving (ID {event.get('image_id', '')}).")
 
 
 @click.group(help="Manage AutoDL container instances.")
@@ -210,6 +287,89 @@ def detail_command(ctx: click.Context, instance_uuid: str) -> None:
     output.render_instance_detail(detail, instance_uuid=instance_uuid)
 
 
+@instance.command("wait", help="Wait for an instance to reach a status.")
+@click.argument("instance_uuid")
+@click.option(
+    "--until",
+    type=click.Choice(instance_handler.INSTANCE_WAIT_TARGETS),
+    default="running",
+    show_default=True,
+    help="Status to wait for; released also succeeds when the instance disappears from the list.",
+)
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=10,
+    show_default=True,
+    help="Seconds between status checks.",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=0,
+    show_default=True,
+    help="Give up after this many seconds; 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Retry transient API errors during polling up to this many times; 0 disables retries.",
+)
+@click.pass_context
+def wait_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    until: str,
+    interval: float,
+    timeout: float,
+    retry: int,
+) -> None:
+    """Wait for an instance to reach a status.
+
+    ``--until running`` accepts the CPU-only (``cpu``) start mode as running.
+    ``--timeout 0`` waits until the status is reached or the process is
+    interrupted. Transient API errors are retried ``--retry`` times
+    consecutively; authentication errors are never retried.
+
+    :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
+    :param instance_uuid: Instance UUID as printed by ``instance list``.
+    :param until: ``running``, ``shutdown``, or ``released``.
+    :param interval: Seconds between status checks.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0``
+        disables retries.
+    :raises click.ClickException: When an argument is invalid, no token is
+        configured, or the API call fails.
+    """
+    config = load_config()
+    token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    try:
+        with build_client(token, config) as client:
+            result = instance_handler.wait_for_instance(
+                client,
+                instance_uuid,
+                until=until,
+                interval=interval,
+                timeout=timeout,
+                retry=retry,
+                on_event=None if as_json else _render_wait_event,
+            )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        output.render_json(result)
+        return
+
+    output.success(
+        f"Instance {result['instance_uuid']} reached status {result['status']!r} after {result['waited_seconds']:g}s."
+    )
+
+
 @instance.command("rename", help="Rename an instance.")
 @click.argument("instance_uuid")
 @click.argument("new_name")
@@ -251,37 +411,106 @@ def rename_command(ctx: click.Context, instance_uuid: str, new_name: str) -> Non
     is_flag=True,
     help="Start the instance in CPU-only (no-GPU) mode.",
 )
+@click.option("--wait", "wait_for", is_flag=True, help="Wait until the instance is running.")
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=None,
+    show_default=False,
+    help="Seconds between status checks when --wait is set (default 10).",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=None,
+    show_default=False,
+    help="Give up after this many seconds when --wait is set (default 0); 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=None,
+    show_default=False,
+    help="Retry transient API errors during waiting up to this many times (default 0).",
+)
 @click.pass_context
-def power_on_command(ctx: click.Context, instance_uuid: str, non_gpu: bool) -> None:
+def power_on_command(
+    ctx: click.Context,
+    instance_uuid: str,
+    non_gpu: bool,
+    wait_for: bool,
+    interval: float | None,
+    timeout: float | None,
+    retry: int | None,
+) -> None:
     """Power an instance on, optionally in CPU-only mode.
 
     AutoDL accepts the request immediately; the instance may take a moment to
     start before it appears as running in ``instance list``. With ``--non-gpu``
     the instance boots without its GPUs, as the web console's no-GPU mode does.
+    ``--wait`` blocks until the instance reports running; the CPU-only start
+    mode counts as running.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param instance_uuid: Instance UUID as printed by ``instance list``.
     :param non_gpu: Start the instance in CPU-only (no-GPU) mode.
+    :param wait_for: Whether to wait until the instance is running.
+    :param interval: Seconds between status checks when waiting.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry.
+    :raises click.UsageError: When a tuning option is used without ``--wait``.
     :raises click.ClickException: When the argument is blank, no token is
         configured, or the API call fails.
     """
+    wait_options = _resolve_wait_options(wait_for, interval, timeout, retry)
     config = load_config()
     token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
         with build_client(token, config) as client:
             result = instance_handler.power_on(client, instance_uuid, non_gpu=non_gpu)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AutoDLError as exc:
+            if wait_options is None:
+                wait_result = None
+            else:
+                if not as_json:
+                    mode = " in CPU-only mode" if non_gpu else ""
+                    output.success(f"Power-on requested for instance {result['instance_uuid']}{mode}.")
+                poll_interval, poll_timeout, poll_retry = wait_options
+                wait_result = instance_handler.wait_for_instance(
+                    client,
+                    str(result["instance_uuid"]),
+                    interval=poll_interval,
+                    timeout=poll_timeout,
+                    retry=poll_retry,
+                    on_event=None if as_json else _render_wait_event,
+                )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if ctx.obj and ctx.obj.get("json"):
-        output.render_json(result)
+    if as_json:
+        if wait_result is None:
+            output.render_json(result)
+        else:
+            output.render_json(
+                {
+                    **result,
+                    "status": wait_result["status"],
+                    "waited_seconds": wait_result["waited_seconds"],
+                    "instance": wait_result["instance"],
+                }
+            )
         return
 
-    mode = " in CPU-only mode" if non_gpu else ""
-    output.success(f"Power-on requested for instance {result['instance_uuid']}{mode}.")
+    if wait_result is None:
+        mode = " in CPU-only mode" if non_gpu else ""
+        output.success(f"Power-on requested for instance {result['instance_uuid']}{mode}.")
+        return
+
+    output.success(
+        f"Instance {wait_result['instance_uuid']} reached status {wait_result['status']!r} "
+        f"after {wait_result['waited_seconds']:g}s."
+    )
 
 
 @instance.command("power-off", help="Power an instance off.")
@@ -552,46 +781,122 @@ def release_command(ctx: click.Context, instance_uuid: str, yes: bool) -> None:
 @click.argument("instance_uuid")
 @click.argument("image_name")
 @click.option("--try-again", is_flag=True, help="Retry a previously failed save.")
+@click.option("--wait", "wait_for", is_flag=True, help="Wait until the image save finishes.")
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=None,
+    show_default=False,
+    help="Seconds between status checks when --wait is set (default 10).",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=None,
+    show_default=False,
+    help="Give up after this many seconds when --wait is set (default 0); 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=None,
+    show_default=False,
+    help="Retry transient API errors during waiting up to this many times (default 0).",
+)
 @click.pass_context
 def save_image_command(
     ctx: click.Context,
     instance_uuid: str,
     image_name: str,
     try_again: bool,
+    wait_for: bool,
+    interval: float | None,
+    timeout: float | None,
+    retry: int | None,
 ) -> None:
     """Save an instance as a custom image.
 
     AutoDL accepts the request and reports success immediately; the image may
-    take longer to appear under the account's private images.
+    take longer to appear under the account's private images. ``--wait`` blocks
+    until that save reports finished. The images matching the instance and
+    image name are snapshotted before the request, so ``--try-again`` ignores
+    the older finished or failed entry.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param instance_uuid: Instance UUID as printed by ``instance list``.
     :param image_name: Name for the new image.
     :param try_again: Whether AutoDL should retry a previously failed save.
+    :param wait_for: Whether to wait until the image save finishes.
+    :param interval: Seconds between status checks when waiting.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry.
+    :raises click.UsageError: When a tuning option is used without ``--wait``.
     :raises click.ClickException: When an argument is blank, no token is
         configured, or the API call fails.
     """
+    wait_options = _resolve_wait_options(wait_for, interval, timeout, retry)
     config = load_config()
     token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
         with build_client(token, config) as client:
+            previous_statuses: dict[int, str] | None = None
+            if wait_options is not None:
+                previous_statuses = image_handler.private_image_status_snapshot(
+                    client,
+                    instance_uuid,
+                    image_name,
+                )
             result = instance_handler.save_image(
                 client,
                 instance_uuid,
                 image_name,
                 try_again=try_again,
             )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AutoDLError as exc:
+            if wait_options is None:
+                wait_result = None
+            else:
+                if not as_json:
+                    output.success(
+                        f"Save requested for instance {result['instance_uuid']} as image {result['image_name']!r}."
+                    )
+                poll_interval, poll_timeout, poll_retry = wait_options
+                wait_result = image_handler.wait_for_private_image(
+                    client,
+                    instance_uuid=str(result["instance_uuid"]),
+                    image_name=str(result["image_name"]),
+                    previous_statuses=previous_statuses or {},
+                    interval=poll_interval,
+                    timeout=poll_timeout,
+                    retry=poll_retry,
+                    on_event=None if as_json else _render_wait_event,
+                )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if ctx.obj and ctx.obj.get("json"):
-        output.render_json(result)
+    if as_json:
+        if wait_result is None:
+            output.render_json(result)
+        else:
+            output.render_json(
+                {
+                    **result,
+                    "status": wait_result["status"],
+                    "waited_seconds": wait_result["waited_seconds"],
+                    "image": wait_result["image"],
+                }
+            )
         return
 
-    output.success(f"Save requested for instance {result['instance_uuid']} as image {result['image_name']!r}.")
+    if wait_result is None:
+        output.success(f"Save requested for instance {result['instance_uuid']} as image {result['image_name']!r}.")
+        return
+
+    output.success(
+        f"Image {wait_result['name']!r} finished saving after {wait_result['waited_seconds']:g}s "
+        f"(ID {wait_result['image_id']})."
+    )
 
 
 @instance.command("create", help="Order a pay-as-you-go instance.")
@@ -635,6 +940,28 @@ def save_image_command(
     show_default=True,
     help="Extra data-disk size in GB.",
 )
+@click.option("--wait", "wait_for", is_flag=True, help="Wait until the instance is running.")
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=None,
+    show_default=False,
+    help="Seconds between status checks when --wait is set (default 10).",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=None,
+    show_default=False,
+    help="Give up after this many seconds when --wait is set (default 0); 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=None,
+    show_default=False,
+    help="Retry transient API errors during waiting up to this many times (default 0).",
+)
 @click.pass_context
 def create_command(
     ctx: click.Context,
@@ -646,6 +973,10 @@ def create_command(
     gpu_num: int,
     name: str,
     data_disk: int,
+    wait_for: bool,
+    interval: float | None,
+    timeout: float | None,
+    retry: int | None,
 ) -> None:
     """Order a pay-as-you-go instance.
 
@@ -654,7 +985,8 @@ def create_command(
     requested model is ordered on. Exactly one of ``--image`` and
     ``--private-image`` must be set. The command does not ask for
     confirmation: AutoDL returns the new instance UUID immediately, and the
-    instance may take a moment to appear in ``instance list``.
+    instance may take a moment to appear in ``instance list``. ``--wait``
+    blocks until the new instance reports running.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param machine_id: Machine to order on; blank means resolve one.
@@ -665,9 +997,15 @@ def create_command(
     :param gpu_num: Number of GPUs to request.
     :param name: Optional instance name.
     :param data_disk: Extra data-disk size in GB.
+    :param wait_for: Whether to wait until the instance is running.
+    :param interval: Seconds between status checks when waiting.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry.
+    :raises click.UsageError: When a tuning option is used without ``--wait``.
     :raises click.ClickException: When the selection options are inconsistent,
         an argument is invalid, no token is configured, or the API call fails.
     """
+    wait_options = _resolve_wait_options(wait_for, interval, timeout, retry)
     if machine_id.strip() and (region.strip() or gpu.strip()):
         raise click.ClickException("Use either --machine-id or --region/--gpu, not both.")
     if not machine_id.strip() and not (region.strip() and gpu.strip()):
@@ -675,6 +1013,7 @@ def create_command(
 
     config = load_config()
     token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
         with build_client(token, config) as client:
@@ -691,17 +1030,47 @@ def create_command(
                 instance_name=name,
                 expand_data_disk=data_disk,
             )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AutoDLError as exc:
+            if wait_options is None:
+                wait_result = None
+            else:
+                if not as_json:
+                    output.success(f"Instance {result['instance_uuid']} ordered on machine {result['machine_id']}.")
+                    output.info("Check its status with `autodl instance list`.")
+                poll_interval, poll_timeout, poll_retry = wait_options
+                wait_result = instance_handler.wait_for_instance(
+                    client,
+                    str(result["instance_uuid"]),
+                    interval=poll_interval,
+                    timeout=poll_timeout,
+                    retry=poll_retry,
+                    on_event=None if as_json else _render_wait_event,
+                )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if ctx.obj and ctx.obj.get("json"):
-        output.render_json(result)
+    if as_json:
+        if wait_result is None:
+            output.render_json(result)
+        else:
+            output.render_json(
+                {
+                    **result,
+                    "status": wait_result["status"],
+                    "waited_seconds": wait_result["waited_seconds"],
+                    "instance": wait_result["instance"],
+                }
+            )
         return
 
-    output.success(f"Instance {result['instance_uuid']} ordered on machine {result['machine_id']}.")
-    output.info("Check its status with `autodl instance list`.")
+    if wait_result is None:
+        output.success(f"Instance {result['instance_uuid']} ordered on machine {result['machine_id']}.")
+        output.info("Check its status with `autodl instance list`.")
+        return
+
+    output.success(
+        f"Instance {wait_result['instance_uuid']} reached status {wait_result['status']!r} "
+        f"after {wait_result['waited_seconds']:g}s."
+    )
 
 
 @instance.command("clone", help="Clone an instance onto a machine.")
@@ -748,6 +1117,28 @@ def create_command(
     is_flag=True,
     help="Keep the source instance's user service address.",
 )
+@click.option("--wait", "wait_for", is_flag=True, help="Wait until the clone is running.")
+@click.option(
+    "--interval",
+    type=click.FloatRange(min=1),
+    default=None,
+    show_default=False,
+    help="Seconds between status checks when --wait is set (default 10).",
+)
+@click.option(
+    "--timeout",
+    type=click.FloatRange(min=0),
+    default=None,
+    show_default=False,
+    help="Give up after this many seconds when --wait is set (default 0); 0 waits until interrupted.",
+)
+@click.option(
+    "--retry",
+    type=click.IntRange(min=0),
+    default=None,
+    show_default=False,
+    help="Retry transient API errors during waiting up to this many times (default 0).",
+)
 @click.pass_context
 def clone_command(
     ctx: click.Context,
@@ -760,6 +1151,10 @@ def clone_command(
     data_disk: int,
     copy_data_disk: bool,
     keep_service_address: bool,
+    wait_for: bool,
+    interval: float | None,
+    timeout: float | None,
+    retry: int | None,
 ) -> None:
     """Clone an instance onto a machine.
 
@@ -768,7 +1163,8 @@ def clone_command(
     requested model is used. The image is inherited from the source instance.
     ``--gpu-num`` defaults to the source instance's GPU count. The command does
     not ask for confirmation: AutoDL returns the new instance UUID immediately,
-    and the clone may take a moment to appear in ``instance list``.
+    and the clone may take a moment to appear in ``instance list``. ``--wait``
+    blocks until the clone reports running.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param instance_uuid: Source instance UUID as printed by ``instance list``.
@@ -781,9 +1177,15 @@ def clone_command(
     :param copy_data_disk: Whether to copy the source instance's data disk.
     :param keep_service_address: Whether to keep the source's user service
         address.
+    :param wait_for: Whether to wait until the clone is running.
+    :param interval: Seconds between status checks when waiting.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry.
+    :raises click.UsageError: When a tuning option is used without ``--wait``.
     :raises click.ClickException: When the selection options are inconsistent,
         an argument is invalid, no token is configured, or the API call fails.
     """
+    wait_options = _resolve_wait_options(wait_for, interval, timeout, retry)
     if machine_id.strip() and (region.strip() or gpu.strip()):
         raise click.ClickException("Use either --machine-id or --region/--gpu, not both.")
     if not machine_id.strip() and not (region.strip() and gpu.strip()):
@@ -791,6 +1193,7 @@ def clone_command(
 
     config = load_config()
     token = require_token(config)
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
 
     try:
         with build_client(token, config) as client:
@@ -812,20 +1215,53 @@ def clone_command(
                 copy_data_disk=copy_data_disk,
                 keep_src_user_service_address=keep_service_address,
             )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AutoDLError as exc:
+            if wait_options is None:
+                wait_result = None
+            else:
+                if not as_json:
+                    output.success(
+                        f"Instance {result['instance_uuid']} cloned from {result['source_instance_uuid']} "
+                        f"on machine {result['machine_id']}."
+                    )
+                    output.info("Check its status with `autodl instance list`.")
+                poll_interval, poll_timeout, poll_retry = wait_options
+                wait_result = instance_handler.wait_for_instance(
+                    client,
+                    str(result["instance_uuid"]),
+                    interval=poll_interval,
+                    timeout=poll_timeout,
+                    retry=poll_retry,
+                    on_event=None if as_json else _render_wait_event,
+                )
+    except (ValueError, TimeoutError, AutoDLError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if ctx.obj and ctx.obj.get("json"):
-        output.render_json(result)
+    if as_json:
+        if wait_result is None:
+            output.render_json(result)
+        else:
+            output.render_json(
+                {
+                    **result,
+                    "status": wait_result["status"],
+                    "waited_seconds": wait_result["waited_seconds"],
+                    "instance": wait_result["instance"],
+                }
+            )
+        return
+
+    if wait_result is None:
+        output.success(
+            f"Instance {result['instance_uuid']} cloned from {result['source_instance_uuid']} "
+            f"on machine {result['machine_id']}."
+        )
+        output.info("Check its status with `autodl instance list`.")
         return
 
     output.success(
-        f"Instance {result['instance_uuid']} cloned from {result['source_instance_uuid']} "
-        f"on machine {result['machine_id']}."
+        f"Instance {wait_result['instance_uuid']} reached status {wait_result['status']!r} "
+        f"after {wait_result['waited_seconds']:g}s."
     )
-    output.info("Check its status with `autodl instance list`.")
 
 
 def register_instance(main_group: click.Group) -> click.Group:

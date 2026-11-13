@@ -11,6 +11,7 @@ import pytest
 
 from autodl_cli.client import APP_VERSION, AutoDLClient
 from autodl_cli.errors import APIError, AuthError
+from autodl_cli.handlers import _poll
 from autodl_cli.handlers import instance as instance_handler
 
 TOKEN = "fake-token"
@@ -1828,3 +1829,387 @@ def test_select_machine_rejects_invalid_arguments(
     with pytest.raises(ValueError, match=message):
         with AutoDLClient(TOKEN, transport=httpx.MockTransport(lambda request: pytest.fail("no request"))) as client:
             instance_handler.select_machine(client, region=region, gpu=gpu, gpu_amount=gpu_amount)
+
+
+WAIT_INSTANCE_UUID = "wait-uuid-1"
+
+
+class _FakeClock:
+    """Monotonic clock that advances only when a fake sleep is recorded."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        """Return the current fake time.
+
+        :returns: Seconds since the fake origin.
+        """
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        """Move the clock forward.
+
+        :param seconds: Delay to add.
+        """
+        self.value += seconds
+
+
+@pytest.fixture
+def fake_poll(monkeypatch) -> tuple[_FakeClock, list[float]]:
+    """Replace the shared polling clock and sleep so tests run instantly.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    :returns: The fake clock and the recorded wait arguments.
+    """
+    clock = _FakeClock()
+    delays: list[float] = []
+
+    def record(seconds: float) -> None:
+        delays.append(seconds)
+        clock.advance(seconds)
+
+    monkeypatch.setattr(_poll, "now", clock)
+    monkeypatch.setattr(_poll, "sleep", record)
+    return clock, delays
+
+
+def test_wait_for_instance_returns_immediately_when_running(fake_poll) -> None:
+    """An instance already running succeeds on the first poll with no sleep."""
+    _, delays = fake_poll
+    entry = {"uuid": WAIT_INSTANCE_UUID, "status": "running"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([entry]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            interval=2.0,
+            on_event=events.append,
+        )
+
+    assert result == {
+        "instance_uuid": WAIT_INSTANCE_UUID,
+        "status": "running",
+        "waited_seconds": 0.0,
+        "instance": entry,
+    }
+    assert events == [
+        {"event": "instance_status", "instance_uuid": WAIT_INSTANCE_UUID, "status": "running"},
+        {"event": "running", "instance_uuid": WAIT_INSTANCE_UUID},
+    ]
+    assert delays == []
+
+
+def test_wait_for_instance_polls_until_running(fake_poll) -> None:
+    """A creating instance is polled again after the interval until it runs."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        status = "creating" if len(calls) == 1 else "running"
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": status}]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            interval=5.0,
+            on_event=events.append,
+        )
+
+    assert result["status"] == "running"
+    assert result["waited_seconds"] == 5.0
+    assert [event["event"] for event in events] == [
+        "instance_status",
+        "instance_status",
+        "running",
+    ]
+    assert [event["status"] for event in events[:2]] == ["creating", "running"]
+    assert delays == [5.0]
+
+
+def test_wait_for_instance_accepts_cpu_mode_as_running(fake_poll) -> None:
+    """The CPU-only start mode is ready to use and keeps its raw status."""
+    entry = {"uuid": WAIT_INSTANCE_UUID, "status": "cpu"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([entry]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            on_event=events.append,
+        )
+
+    assert result["status"] == "cpu"
+    assert events[-1] == {"event": "running", "instance_uuid": WAIT_INSTANCE_UUID}
+
+
+def test_wait_for_instance_treats_a_missing_entry_as_pending(fake_poll) -> None:
+    """A missing or non-matching entry is pending and then matches by exact UUID."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return _success(_page([{"uuid": "different-uuid", "status": "running"}]))
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "running"}]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            interval=4.0,
+            on_event=events.append,
+        )
+
+    assert result["status"] == "running"
+    assert [event["status"] for event in events if event["event"] == "instance_status"] == [
+        "not found",
+        "running",
+    ]
+    assert delays == [4.0]
+
+
+def test_wait_for_instance_raises_when_the_instance_fails(fake_poll) -> None:
+    """A failed status while waiting for running becomes an :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "failed"}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="entered status 'failed' while waiting for running"):
+            instance_handler.wait_for_instance(client, WAIT_INSTANCE_UUID)
+
+
+def test_wait_for_instance_failed_status_is_case_insensitive(fake_poll) -> None:
+    """Mixed-case failed statuses still abort the wait."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "Error"}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="entered status 'Error'"):
+            instance_handler.wait_for_instance(client, WAIT_INSTANCE_UUID)
+
+
+def test_wait_for_instance_until_shutdown_succeeds(fake_poll) -> None:
+    """``shutdown`` is the only success status for that target."""
+    entry = {"uuid": WAIT_INSTANCE_UUID, "status": "shutdown"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([entry]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            until="shutdown",
+            on_event=events.append,
+        )
+
+    assert result["status"] == "shutdown"
+    assert events[-1] == {"event": "shutdown", "instance_uuid": WAIT_INSTANCE_UUID}
+
+
+def test_wait_for_instance_until_shutdown_raises_on_released(fake_poll) -> None:
+    """A released instance cannot reach shutdown and raises :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "released"}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="while waiting for shutdown"):
+            instance_handler.wait_for_instance(client, WAIT_INSTANCE_UUID, until="shutdown")
+
+
+def test_wait_for_instance_until_released_accepts_a_missing_entry(fake_poll) -> None:
+    """A disappeared instance counts as released."""
+    events: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            until="released",
+            on_event=events.append,
+        )
+
+    assert result == {
+        "instance_uuid": WAIT_INSTANCE_UUID,
+        "status": "released",
+        "waited_seconds": 0.0,
+        "instance": None,
+    }
+    assert events == [
+        {"event": "instance_status", "instance_uuid": WAIT_INSTANCE_UUID, "status": "not found"},
+        {"event": "released", "instance_uuid": WAIT_INSTANCE_UUID},
+    ]
+
+
+def test_wait_for_instance_until_released_checks_before_failed_statuses(fake_poll) -> None:
+    """``released`` is in the failed set but succeeds before that branch."""
+    entry = {"uuid": WAIT_INSTANCE_UUID, "status": "released"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([entry]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            until="released",
+            on_event=events.append,
+        )
+
+    assert result["status"] == "released"
+    assert result["instance"] == entry
+    assert events[-1] == {"event": "released", "instance_uuid": WAIT_INSTANCE_UUID}
+
+
+def test_wait_for_instance_times_out(fake_poll) -> None:
+    """A status that never changes raises :class:`TimeoutError` with the last status."""
+    _, delays = fake_poll
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "creating"}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(
+            TimeoutError,
+            match=r"Timed out after 5s waiting for instance .* to reach running \(last status: 'creating'\)",
+        ):
+            instance_handler.wait_for_instance(
+                client,
+                WAIT_INSTANCE_UUID,
+                interval=2.0,
+                timeout=5.0,
+            )
+
+    assert delays == [2.0, 2.0, 2.0]
+
+
+def test_wait_for_instance_zero_timeout_has_no_deadline(fake_poll) -> None:
+    """``timeout=0`` keeps polling past what would be a deadline."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        status = "creating" if len(calls) < 3 else "running"
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": status}]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            interval=100.0,
+            timeout=0.0,
+        )
+
+    assert result["status"] == "running"
+    assert result["waited_seconds"] == 200.0
+    assert delays == [100.0, 100.0]
+
+
+def test_wait_for_instance_retries_a_transient_error(fake_poll) -> None:
+    """A 500 is retried when ``retry`` allows it, then the wait succeeds."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(500, json={"msg": "boom"})
+        return _success(_page([{"uuid": WAIT_INSTANCE_UUID, "status": "running"}]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = instance_handler.wait_for_instance(
+            client,
+            WAIT_INSTANCE_UUID,
+            interval=3.0,
+            retry=1,
+            on_event=events.append,
+        )
+
+    assert result["status"] == "running"
+    assert calls == [1, 1]
+    assert events[0]["event"] == "poll_failed"
+    assert events[0]["retries"] == 1
+    assert events[0]["limit"] == 1
+    assert "boom" in str(events[0]["error"])
+    assert delays == [3.0]
+
+
+def test_wait_for_instance_never_retries_auth_errors(fake_poll) -> None:
+    """A 401 propagates immediately even with retries enabled."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(401, json={"msg": "bad token"})
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AuthError, match="bad token"):
+            instance_handler.wait_for_instance(
+                client,
+                WAIT_INSTANCE_UUID,
+                retry=3,
+                on_event=events.append,
+            )
+
+    assert calls == [1]
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"until": "stopped"}, "until"),
+        ({"interval": 0}, "interval"),
+        ({"interval": -1}, "interval"),
+        ({"interval": True}, "interval"),
+        ({"timeout": -1}, "timeout"),
+        ({"timeout": True}, "timeout"),
+        ({"retry": -1}, "retry"),
+        ({"retry": True}, "retry"),
+    ],
+)
+def test_wait_for_instance_rejects_invalid_options(kwargs: dict[str, object], message: str) -> None:
+    """Invalid wait options fail before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for invalid options")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=message):
+            instance_handler.wait_for_instance(client, WAIT_INSTANCE_UUID, **kwargs)
+
+
+@pytest.mark.parametrize("instance_id", ["", "   "])
+def test_wait_for_instance_rejects_a_blank_uuid(instance_id: str) -> None:
+    """A blank UUID fails before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for a blank UUID")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="instance_id must not be empty"):
+            instance_handler.wait_for_instance(client, instance_id)

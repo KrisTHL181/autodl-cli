@@ -46,7 +46,7 @@ ORDER_BACKOFF_FACTOR = 2.0
 MAX_ORDER_BACKOFF_MULTIPLE = 8.0
 
 #: Instance statuses that mean the newly ordered instance will never start.
-FAILED_INSTANCE_STATUSES = frozenset({"failed", "error", "exception", "released"})
+FAILED_INSTANCE_STATUSES = instance_handler.FAILED_INSTANCE_STATUSES
 
 #: How many times a surplus order is released before the failure is reported.
 EXTRA_RELEASE_ATTEMPTS = 3

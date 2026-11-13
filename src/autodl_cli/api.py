@@ -3,9 +3,9 @@
 Code that consumes autodl-cli as a library should import from here rather
 than from :mod:`autodl_cli.handlers` directly. This module re-exports the
 handler surface for password login, browser-token lookup, account balance,
-instance listing/details, instance creation and lifecycle actions, and the
-base-image catalogue, and normalises internal exceptions into the
-:class:`~autodl_cli.errors.AutoDLError` hierarchy.
+instance listing/details, instance creation and lifecycle actions, waiting for
+instances and private-image saves, and the base-image catalogue, and normalises
+internal exceptions into the :class:`~autodl_cli.errors.AutoDLError` hierarchy.
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ __all__ = [
     "reset_instance",
     "save_image",
     "schedule_shutdown",
+    "wait_for_instance",
+    "wait_for_private_image",
 ]
 
 
@@ -534,6 +536,96 @@ def save_image(
             instance_uuid,
             image_name,
             try_again=try_again,
+        )
+
+
+def wait_for_instance(
+    token: str,
+    instance_uuid: str,
+    *,
+    until: str = "running",
+    interval: float = 10.0,
+    timeout: float = 0.0,
+    retry: int = 0,
+) -> dict[str, object]:
+    """Poll until an instance reaches a target status.
+
+    ``running`` succeeds on the ``running`` and CPU-only (``cpu``) statuses;
+    ``shutdown`` and ``released`` wait for those statuses respectively, with a
+    missing instance counting as released. When ``timeout`` is ``0`` there is
+    no deadline and the call blocks until the target is reached.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Instance UUID as returned by :func:`list_instances`.
+    :param until: ``running``, ``shutdown``, or ``released``.
+    :param interval: Seconds between status checks; must be positive.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0`` disables
+        retries.
+    :returns: A mapping with ``instance_uuid``, ``status``, ``waited_seconds``,
+        and ``instance``.
+    :raises ValueError: When an argument is invalid.
+    :raises TimeoutError: When ``timeout`` expires before the target status.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        return instance_handler.wait_for_instance(
+            client,
+            instance_uuid,
+            until=until,
+            interval=interval,
+            timeout=timeout,
+            retry=retry,
+        )
+
+
+def wait_for_private_image(
+    token: str,
+    *,
+    instance_uuid: str,
+    image_name: str,
+    previous_statuses: dict[int, str] | None = None,
+    interval: float = 10.0,
+    timeout: float = 0.0,
+    retry: int = 0,
+) -> dict[str, object]:
+    """Poll until a private-image save finishes.
+
+    Only images whose source instance UUID and name match exactly are
+    considered. When ``previous_statuses`` is ``None``, the matching images are
+    snapshotted at call time so an older finished or failed save is ignored.
+    When ``timeout`` is ``0`` there is no deadline and the call blocks until
+    the save finishes.
+
+    :param token: AutoDL API token, typically copied from a browser session.
+    :param instance_uuid: Source instance UUID of the save.
+    :param image_name: Name the image is being saved under.
+    :param previous_statuses: Snapshot taken before the save request, or
+        ``None`` to take one now.
+    :param interval: Seconds between status checks; must be positive.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0`` disables
+        retries.
+    :returns: A mapping with ``image_uuid``, ``image_id``, ``name``,
+        ``status``, ``waited_seconds``, and ``image``.
+    :raises ValueError: When an argument is invalid.
+    :raises TimeoutError: When ``timeout`` expires before the save finishes.
+    :raises autodl_cli.errors.AutoDLError: For every authentication or API
+        failure.
+    """
+    with AutoDLClient(token) as client:
+        previous = previous_statuses
+        if previous is None:
+            previous = image_handler.private_image_status_snapshot(client, instance_uuid, image_name)
+        return image_handler.wait_for_private_image(
+            client,
+            instance_uuid=instance_uuid,
+            image_name=image_name,
+            previous_statuses=previous,
+            interval=interval,
+            timeout=timeout,
+            retry=retry,
         )
 
 

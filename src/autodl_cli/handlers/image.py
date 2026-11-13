@@ -12,6 +12,10 @@ The account's own saved images live behind
 Deleting one uses ``DELETE /api/v1/image/private/delete`` with the numeric
 ``image_id`` from that list, not the ``image-uuid`` string; it answers with
 ``"data": null``.
+
+A save is followed through the same list: :func:`wait_for_private_image` polls
+until a matching image finishes, comparing against a pre-save snapshot from
+:func:`private_image_status_snapshot` so a retry ignores the older entry.
 """
 
 from __future__ import annotations
@@ -19,10 +23,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
+from autodl_cli.handlers import _poll
 from autodl_cli.handlers._common import require_success, require_success_any, require_success_list
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from autodl_cli.client import AutoDLClient
 
@@ -40,6 +45,9 @@ DEFAULT_PRIVATE_PAGE_SIZE = 100
 
 #: Largest page size accepted by the private-image listing.
 MAX_PRIVATE_PAGE_SIZE = 100
+
+#: Private-image statuses that mean the save will never finish.
+FAILED_IMAGE_STATUSES = frozenset({"failed", "error"})
 
 _MALFORMED = "AutoDL image list returned malformed data"
 
@@ -338,3 +346,216 @@ def delete_private_image(client: AutoDLClient, image_id: int) -> dict[str, objec
     require_success_any(payload, action="delete private image")
 
     return {"image_id": image_id, "deleted": True}
+
+
+def _is_matching_private_image(entry: dict[str, object], instance_uuid: str, image_name: str) -> bool:
+    """Return whether an entry is the save of a given instance under a name.
+
+    Both fields must match exactly: the listing is not filtered by the server,
+    so a substring match could pick up another image.
+
+    :param entry: One private-image mapping from :func:`list_private_images`.
+    :param instance_uuid: Source instance UUID of the save.
+    :param image_name: Name the image is being saved under.
+    :returns: ``True`` when the entry names the same instance and image.
+    """
+    return entry.get("instance_uuid") == instance_uuid and entry.get("name") == image_name
+
+
+def _image_status(entry: dict[str, object]) -> str:
+    """Return a private image's status string.
+
+    :param entry: One private-image mapping.
+    :returns: The status, or an empty string when it is missing or not a string.
+    """
+    status = entry.get("status")
+    return status if isinstance(status, str) else ""
+
+
+def _save_error(entry: dict[str, object]) -> str:
+    """Return the save error reported inside a private image's progress data.
+
+    :param entry: One private-image mapping.
+    :returns: The non-empty ``progress_content.error`` string, or ``""``.
+    """
+    progress = entry.get("progress_content")
+    if not isinstance(progress, dict):
+        return ""
+    error = progress.get("error")
+    return error if isinstance(error, str) and error else ""
+
+
+def private_image_status_snapshot(
+    client: AutoDLClient,
+    instance_uuid: str,
+    image_name: str,
+) -> dict[int, str]:
+    """Snapshot the private images already saved for one instance and name.
+
+    A save is identified by the exact pair of source instance UUID and image
+    name, which is what :func:`wait_for_private_image` compares against. The
+    snapshot lets a retry (``--try-again``) ignore an older finished or failed
+    entry and wait for the new save instead.
+
+    :param client: Authenticated API client.
+    :param instance_uuid: Source instance UUID of the save.
+    :param image_name: Name the image is being saved under.
+    :returns: A mapping of positive numeric image ID to status.
+    :raises ValueError: When either identifier is blank.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the API reports a failure or
+        returns malformed data.
+    """
+    instance = instance_uuid.strip()
+    name = image_name.strip()
+    if not instance:
+        raise ValueError("instance_uuid must not be empty")
+    if not name:
+        raise ValueError("image_name must not be empty")
+
+    snapshot: dict[int, str] = {}
+    for entry in list_private_images(client):
+        if not _is_matching_private_image(entry, instance, name):
+            continue
+        image_id = entry.get("id")
+        if isinstance(image_id, bool) or not isinstance(image_id, int) or image_id <= 0:
+            continue
+        snapshot[image_id] = _image_status(entry)
+    return snapshot
+
+
+def wait_for_private_image(
+    client: AutoDLClient,
+    *,
+    instance_uuid: str,
+    image_name: str,
+    previous_statuses: Mapping[int, str],
+    interval: float = 10.0,
+    timeout: float = 0.0,
+    retry: int = 0,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Poll the private-image list until a save finishes.
+
+    Only images whose source instance UUID and name match exactly are
+    considered. A save that was already present with the same status in
+    ``previous_statuses`` is ignored, which keeps ``--try-again`` from
+    returning an older finished image or failing on an older failed one.
+
+    An image succeeds when its status is ``finished`` and it is new or has
+    changed status. A new or changed image whose status is ``failed`` or
+    ``error``, or whose ``progress_content`` carries a non-empty ``error``,
+    raises :class:`~autodl_cli.errors.APIError`.
+
+    When ``timeout`` is ``0`` there is no deadline and the call blocks until
+    the save finishes or the process is interrupted.
+
+    :param client: Authenticated API client.
+    :param instance_uuid: Source instance UUID of the save.
+    :param image_name: Name the image is being saved under.
+    :param previous_statuses: Snapshot from
+        :func:`private_image_status_snapshot`, taken before the save request.
+    :param interval: Seconds between checks; must be positive.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0`` disables
+        retries.
+    :param on_event: Optional progress callback. ``image_status`` events are
+        emitted whenever a matching image's status changes, followed by
+        ``finished`` on success.
+    :returns: A mapping with ``image_uuid``, ``image_id``, ``name``,
+        ``status``, ``waited_seconds``, and ``image`` (the matching entry).
+    :raises ValueError: When an identifier is blank or a numeric option is
+        invalid.
+    :raises TimeoutError: When ``timeout`` expires before the save finishes.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the save reports a failure.
+    """
+    instance = instance_uuid.strip()
+    name = image_name.strip()
+    if not instance:
+        raise ValueError("instance_uuid must not be empty")
+    if not name:
+        raise ValueError("image_name must not be empty")
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
+        raise ValueError("interval must be a positive number")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
+        raise ValueError("timeout must not be negative")
+    if isinstance(retry, bool) or not isinstance(retry, int) or retry < 0:
+        raise ValueError("retry must be an integer of at least 0")
+
+    previous = dict(previous_statuses)
+    started = _poll.now()
+    deadline = started + timeout if timeout > 0 else None
+    last_statuses: dict[int, str] = {}
+    last_status: str | None = None
+
+    while True:
+        retry_reason = f"waiting for image {name!r} from instance {instance} (last status: {last_status!r})"
+        images = _poll.call_with_retry(
+            lambda: list_private_images(client),
+            retry=retry,
+            interval=interval,
+            deadline=deadline,
+            timeout=timeout,
+            on_event=on_event,
+            timeout_reason=retry_reason,
+        )
+
+        matches: list[tuple[int, dict[str, object]]] = []
+        for entry in images:
+            if not _is_matching_private_image(entry, instance, name):
+                continue
+            image_id = entry.get("id")
+            if isinstance(image_id, bool) or not isinstance(image_id, int) or image_id <= 0:
+                continue
+            matches.append((image_id, entry))
+
+        for image_id, entry in matches:
+            status = _image_status(entry)
+            if last_statuses.get(image_id) != status:
+                progress = entry.get("progress_content")
+                _poll.emit(
+                    on_event,
+                    {
+                        "event": "image_status",
+                        "image_id": image_id,
+                        "name": name,
+                        "status": status or "unknown",
+                        "progress": progress if isinstance(progress, dict) else None,
+                    },
+                )
+                last_statuses[image_id] = status
+            last_status = status or "unknown"
+
+            changed = image_id not in previous or previous[image_id] != status
+            if not changed:
+                continue
+
+            folded = status.casefold()
+            error = _save_error(entry)
+            if folded in FAILED_IMAGE_STATUSES:
+                raise APIError(f"Image {name!r} entered status {status!r} while waiting for it to finish")
+            if folded == "finished":
+                _poll.emit(
+                    on_event,
+                    {
+                        "event": "finished",
+                        "image_uuid": entry.get("image_uuid"),
+                        "image_id": image_id,
+                        "name": name,
+                    },
+                )
+                return {
+                    "image_uuid": entry.get("image_uuid"),
+                    "image_id": image_id,
+                    "name": name,
+                    "status": status,
+                    "waited_seconds": round(_poll.now() - started, 1),
+                    "image": entry,
+                }
+            if error:
+                raise APIError(f"Image {name!r} failed to save: {error}")
+
+        timeout_reason = f"waiting for image {name!r} from instance {instance} (last status: {last_status!r})"
+        _poll.raise_if_timed_out(deadline, timeout=timeout, reason=timeout_reason)
+        _poll.sleep(interval)

@@ -9,6 +9,7 @@ import pytest
 
 from autodl_cli.client import AutoDLClient
 from autodl_cli.errors import APIError, AuthError
+from autodl_cli.handlers import _poll
 from autodl_cli.handlers import image as image_handler
 
 TOKEN = "fake-token"
@@ -503,3 +504,429 @@ def test_delete_private_image_failure_raises_api_error() -> None:
     with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(APIError, match="no such image"):
             image_handler.delete_private_image(client, 842526)
+
+
+WAIT_INSTANCE_UUID = "wn8vt448yq-473b14de"
+WAIT_IMAGE_NAME = "trainer-snapshot"
+
+
+class _FakeClock:
+    """Monotonic clock that advances only when a fake sleep is recorded."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        """Return the current fake time.
+
+        :returns: Seconds since the fake origin.
+        """
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        """Move the clock forward.
+
+        :param seconds: Delay to add.
+        """
+        self.value += seconds
+
+
+@pytest.fixture
+def fake_poll(monkeypatch) -> tuple[_FakeClock, list[float]]:
+    """Replace the shared polling clock and sleep so tests run instantly.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    :returns: The fake clock and the recorded wait arguments.
+    """
+    clock = _FakeClock()
+    delays: list[float] = []
+
+    def record(seconds: float) -> None:
+        delays.append(seconds)
+        clock.advance(seconds)
+
+    monkeypatch.setattr(_poll, "now", clock)
+    monkeypatch.setattr(_poll, "sleep", record)
+    return clock, delays
+
+
+def _save_entry(
+    image_id: int,
+    *,
+    status: str = "finished",
+    error: str = "",
+    progress: int = 100,
+    image_uuid: str = "image-new",
+    instance_uuid: str = WAIT_INSTANCE_UUID,
+    name: str = WAIT_IMAGE_NAME,
+) -> dict[str, object]:
+    """Build one private-image entry for a save.
+
+    :param image_id: Numeric image ID.
+    :param status: Save status.
+    :param error: Error text placed inside ``progress_content``.
+    :param progress: Progress percentage.
+    :param image_uuid: Image UUID string.
+    :param instance_uuid: Source instance UUID.
+    :param name: Image name.
+    :returns: A private-image mapping.
+    """
+    return {
+        "id": image_id,
+        "instance_uuid": instance_uuid,
+        "name": name,
+        "status": status,
+        "image_uuid": image_uuid,
+        "progress_content": {"progress": progress, "error": error},
+    }
+
+
+def test_wait_for_private_image_returns_a_new_finished_image(fake_poll) -> None:
+    """A matching image absent from the snapshot succeeds on the first poll."""
+    _, delays = fake_poll
+    entry = _save_entry(9001, image_uuid="image-new")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page([entry]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={},
+            interval=2.0,
+            on_event=events.append,
+        )
+
+    assert result == {
+        "image_uuid": "image-new",
+        "image_id": 9001,
+        "name": WAIT_IMAGE_NAME,
+        "status": "finished",
+        "waited_seconds": 0.0,
+        "image": entry,
+    }
+    assert events == [
+        {
+            "event": "image_status",
+            "image_id": 9001,
+            "name": WAIT_IMAGE_NAME,
+            "status": "finished",
+            "progress": {"progress": 100, "error": ""},
+        },
+        {
+            "event": "finished",
+            "image_uuid": "image-new",
+            "image_id": 9001,
+            "name": WAIT_IMAGE_NAME,
+        },
+    ]
+    assert delays == []
+
+
+def test_wait_for_private_image_ignores_a_pre_existing_finished_image(fake_poll) -> None:
+    """A finished image that was already present does not end the wait."""
+    _, delays = fake_poll
+    old = _save_entry(9001, image_uuid="image-old")
+    new = _save_entry(9002, image_uuid="image-new")
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        entries = [old] if len(calls) == 1 else [old, new]
+        return _success(_private_page(entries))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={9001: "finished"},
+            interval=4.0,
+        )
+
+    assert result["image_id"] == 9002
+    assert result["image_uuid"] == "image-new"
+    assert result["waited_seconds"] == 4.0
+    assert delays == [4.0]
+
+
+def test_wait_for_private_image_polls_until_finished(fake_poll) -> None:
+    """A saving image is polled again after the interval until it finishes."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        status = "saving" if len(calls) == 1 else "finished"
+        return _success(_private_page([_save_entry(9001, status=status, progress=42)]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={},
+            interval=2.0,
+            on_event=events.append,
+        )
+
+    assert result["status"] == "finished"
+    assert result["waited_seconds"] == 2.0
+    assert [event["event"] for event in events] == [
+        "image_status",
+        "image_status",
+        "finished",
+    ]
+    assert [event.get("status") for event in events[:2]] == ["saving", "finished"]
+    assert events[0]["progress"] == {"progress": 42, "error": ""}
+    assert delays == [2.0]
+
+
+def test_wait_for_private_image_raises_on_a_failed_status(fake_poll) -> None:
+    """A new failed image raises :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page([_save_entry(9001, status="failed")]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="entered status 'failed'"):
+            image_handler.wait_for_private_image(
+                client,
+                instance_uuid=WAIT_INSTANCE_UUID,
+                image_name=WAIT_IMAGE_NAME,
+                previous_statuses={},
+            )
+
+
+def test_wait_for_private_image_raises_on_a_progress_error(fake_poll) -> None:
+    """A non-empty ``progress_content.error`` raises :class:`APIError`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page([_save_entry(9001, status="saving", error="disk full")]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(APIError, match="disk full"):
+            image_handler.wait_for_private_image(
+                client,
+                instance_uuid=WAIT_INSTANCE_UUID,
+                image_name=WAIT_IMAGE_NAME,
+                previous_statuses={},
+            )
+
+
+def test_wait_for_private_image_accepts_finished_with_a_stale_error(fake_poll) -> None:
+    """A finished image wins over leftover error text from an earlier attempt."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page([_save_entry(9001, status="finished", error="previous attempt")]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={},
+        )
+
+    assert result["status"] == "finished"
+    assert result["image_id"] == 9001
+
+
+def test_wait_for_private_image_ignores_a_pre_existing_failure(fake_poll) -> None:
+    """``--try-again`` does not fail immediately on the older failed entry."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        status = "failed" if len(calls) == 1 else "finished"
+        return _success(_private_page([_save_entry(9001, status=status)]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={9001: "failed"},
+            interval=3.0,
+        )
+
+    assert result["status"] == "finished"
+    assert delays == [3.0]
+
+
+def test_wait_for_private_image_ignores_unrelated_images(fake_poll) -> None:
+    """Only the exact source instance and name pair is considered."""
+    calls: list[int] = []
+    wanted = _save_entry(9001)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            unrelated = [
+                _save_entry(8001, instance_uuid="other-instance"),
+                _save_entry(8002, name="other-name"),
+            ]
+            return _success(_private_page(unrelated))
+        return _success(_private_page([wanted]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={},
+            interval=1.0,
+        )
+
+    assert result["image_id"] == 9001
+    assert calls == [1, 1]
+
+
+def test_wait_for_private_image_times_out(fake_poll) -> None:
+    """An image that never finishes raises :class:`TimeoutError`."""
+    _, delays = fake_poll
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page([_save_entry(9001, status="saving")]))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(
+            TimeoutError,
+            match=r"Timed out after 5s waiting for image .* \(last status: 'saving'\)",
+        ):
+            image_handler.wait_for_private_image(
+                client,
+                instance_uuid=WAIT_INSTANCE_UUID,
+                image_name=WAIT_IMAGE_NAME,
+                previous_statuses={},
+                interval=2.0,
+                timeout=5.0,
+            )
+
+    assert delays == [2.0, 2.0, 2.0]
+
+
+def test_wait_for_private_image_retries_a_transient_error(fake_poll) -> None:
+    """A 500 is retried when ``retry`` allows it, then the wait succeeds."""
+    _, delays = fake_poll
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(500, json={"msg": "boom"})
+        return _success(_private_page([_save_entry(9001)]))
+
+    events: list[dict[str, object]] = []
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        result = image_handler.wait_for_private_image(
+            client,
+            instance_uuid=WAIT_INSTANCE_UUID,
+            image_name=WAIT_IMAGE_NAME,
+            previous_statuses={},
+            interval=3.0,
+            retry=1,
+            on_event=events.append,
+        )
+
+    assert result["image_id"] == 9001
+    assert events[0]["event"] == "poll_failed"
+    assert events[0]["retries"] == 1
+    assert delays == [3.0]
+
+
+def test_private_image_status_snapshot_collects_exact_matches() -> None:
+    """Only exact instance/name matches with positive numeric IDs are recorded."""
+    entries = [
+        _save_entry(9001, status="saving"),
+        _save_entry(9002, status="failed"),
+        _save_entry(8001, status="finished", instance_uuid="other-instance"),
+        _save_entry(8002, status="finished", name="other-name"),
+        {**_save_entry(0, status="finished")},
+        {**_save_entry(9003, status="finished"), "id": True},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _success(_private_page(entries))
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        snapshot = image_handler.private_image_status_snapshot(
+            client,
+            WAIT_INSTANCE_UUID,
+            WAIT_IMAGE_NAME,
+        )
+
+    assert snapshot == {9001: "saving", 9002: "failed"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"instance_uuid": "", "image_name": WAIT_IMAGE_NAME}, "instance_uuid must not be empty"),
+        ({"instance_uuid": "   ", "image_name": WAIT_IMAGE_NAME}, "instance_uuid must not be empty"),
+        ({"instance_uuid": WAIT_INSTANCE_UUID, "image_name": ""}, "image_name must not be empty"),
+        ({"instance_uuid": WAIT_INSTANCE_UUID, "image_name": "   "}, "image_name must not be empty"),
+    ],
+)
+def test_wait_for_private_image_rejects_blank_identifiers(kwargs: dict[str, object], message: str) -> None:
+    """Blank identifiers fail before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for a blank identifier")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=message):
+            image_handler.wait_for_private_image(
+                client,
+                previous_statuses={},
+                **kwargs,
+            )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"interval": 0}, "interval"),
+        ({"interval": -1}, "interval"),
+        ({"interval": True}, "interval"),
+        ({"timeout": -1}, "timeout"),
+        ({"timeout": True}, "timeout"),
+        ({"retry": -1}, "retry"),
+        ({"retry": True}, "retry"),
+    ],
+)
+def test_wait_for_private_image_rejects_invalid_numeric_options(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    """Invalid numeric options fail before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for invalid options")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match=message):
+            image_handler.wait_for_private_image(
+                client,
+                instance_uuid=WAIT_INSTANCE_UUID,
+                image_name=WAIT_IMAGE_NAME,
+                previous_statuses={},
+                **kwargs,
+            )
+
+
+@pytest.mark.parametrize("instance_uuid", ["", "   "])
+def test_private_image_status_snapshot_rejects_a_blank_instance_uuid(instance_uuid: str) -> None:
+    """A blank instance UUID fails before any request is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("no request must be sent for a blank UUID")
+
+    with AutoDLClient(TOKEN, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="instance_uuid must not be empty"):
+            image_handler.private_image_status_snapshot(client, instance_uuid, WAIT_IMAGE_NAME)

@@ -59,6 +59,10 @@ snapshot for the image and the instance list for ``req_gpu_amount``.
 :func:`resolve_clone_image` resolves the image alone, for callers such as
 ``tools snipe --clone`` that choose their own GPU count. Like create, the
 response's ``data`` is the new instance UUID string.
+
+Waiting for an instance sends no write request: :func:`wait_for_instance` polls
+the instance list until the instance reaches ``running`` (including the CPU-only
+``cpu`` mode), ``shutdown``, or ``released``.
 """
 
 from __future__ import annotations
@@ -67,12 +71,13 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from autodl_cli.errors import APIError
+from autodl_cli.handlers import _poll
 from autodl_cli.handlers import gpu as gpu_handler
 from autodl_cli.handlers._common import require_success, require_success_any
 from autodl_cli.money import PRICE_FIELDS, to_yuan
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from autodl_cli.client import AutoDLClient
 
@@ -123,6 +128,12 @@ CREATE_CHARGE_TYPE = "payg"
 
 #: Number of instances requested per API call when the caller does not choose.
 DEFAULT_PAGE_SIZE = 100
+
+#: Instance statuses that mean the instance will never reach a running state.
+FAILED_INSTANCE_STATUSES = frozenset({"failed", "error", "exception", "released"})
+
+#: Statuses accepted by :func:`wait_for_instance` as a wait target.
+INSTANCE_WAIT_TARGETS = ("running", "shutdown", "released")
 
 #: Instance fields searched by the client-side ``query`` filter.
 _QUERY_FIELDS = (
@@ -993,3 +1004,143 @@ def save_image(
         "try_again": try_again,
         "saved": True,
     }
+
+
+def _listed_status(entry: dict[str, object] | None) -> str:
+    """Return a list entry's status, or ``"not found"`` when it is missing.
+
+    :param entry: The matching instance-list entry, or ``None``.
+    :returns: The status string, with missing or empty values mapped to
+        ``"not found"``.
+    """
+    if entry is None:
+        return "not found"
+    status = entry.get("status")
+    return str(status) if status else "not found"
+
+
+def wait_for_instance(
+    client: AutoDLClient,
+    instance_id: str,
+    *,
+    until: str = "running",
+    interval: float = 10.0,
+    timeout: float = 0.0,
+    retry: int = 0,
+    on_event: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Poll the instance list until an instance reaches a target status.
+
+    The instance is looked up with the list endpoint's local ``query`` filter
+    and accepted only when its ``uuid`` matches exactly. A missing entry is
+    treated as the pending ``"not found"`` status, which is how a just-ordered
+    instance looks before AutoDL reports it.
+
+    ``running`` succeeds on ``running`` or ``cpu``; the CPU-only (``non_gpu``)
+    start mode reports ``cpu`` but is ready to use, and the raw observed status
+    is kept in the result. ``shutdown`` succeeds only on ``shutdown``; a
+    released instance or any other failed status raises
+    :class:`~autodl_cli.errors.APIError`. ``released`` succeeds when the entry
+    disappears or reports ``released``.
+
+    When ``timeout`` is ``0`` there is no deadline and the call blocks until
+    the target status is reached or the process is interrupted.
+
+    :param client: Authenticated API client.
+    :param instance_id: Instance UUID from :func:`list_instances`.
+    :param until: ``running``, ``shutdown``, or ``released``.
+    :param interval: Seconds between status checks; must be positive.
+    :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
+    :param retry: Consecutive transient polling errors to retry; ``0`` disables
+        retries.
+    :param on_event: Optional progress callback. ``instance_status`` events are
+        emitted whenever the observed status changes, followed by ``running``,
+        ``shutdown``, or ``released`` on success.
+    :returns: A mapping with ``instance_uuid``, ``status``, ``waited_seconds``,
+        and ``instance`` (the matching list entry, or ``None`` when the
+        instance has disappeared).
+    :raises ValueError: When the identifier is blank, ``until`` is unsupported,
+        or a numeric option is invalid.
+    :raises TimeoutError: When ``timeout`` expires before the target status.
+    :raises autodl_cli.errors.AuthError: When the token is rejected.
+    :raises autodl_cli.errors.APIError: When the instance enters a failed
+        status.
+    """
+    instance_uuid = instance_id.strip()
+    if not instance_uuid:
+        raise ValueError("instance_id must not be empty")
+    if until not in INSTANCE_WAIT_TARGETS:
+        raise ValueError(f"until must be one of {', '.join(INSTANCE_WAIT_TARGETS)}")
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
+        raise ValueError("interval must be a positive number")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
+        raise ValueError("timeout must not be negative")
+    if isinstance(retry, bool) or not isinstance(retry, int) or retry < 0:
+        raise ValueError("retry must be an integer of at least 0")
+
+    started = _poll.now()
+    deadline = started + timeout if timeout > 0 else None
+    last_status: str | None = None
+
+    while True:
+        retry_reason = f"waiting for instance {instance_uuid} to reach {until} (last status: {last_status!r})"
+        listed = _poll.call_with_retry(
+            lambda: list_instances(client, query=instance_uuid),
+            retry=retry,
+            interval=interval,
+            deadline=deadline,
+            timeout=timeout,
+            on_event=on_event,
+            timeout_reason=retry_reason,
+        )
+        entry = next(
+            (
+                candidate
+                for candidate in listed
+                if isinstance(candidate, dict) and candidate.get("uuid") == instance_uuid
+            ),
+            None,
+        )
+        status = _listed_status(entry)
+        if status != last_status:
+            _poll.emit(
+                on_event,
+                {
+                    "event": "instance_status",
+                    "instance_uuid": instance_uuid,
+                    "status": status,
+                },
+            )
+            last_status = status
+
+        folded = status.casefold()
+        if until == "released" and (entry is None or folded == "released"):
+            _poll.emit(on_event, {"event": "released", "instance_uuid": instance_uuid})
+            return {
+                "instance_uuid": instance_uuid,
+                "status": "released",
+                "waited_seconds": round(_poll.now() - started, 1),
+                "instance": entry,
+            }
+        if until == "running" and folded in ("running", "cpu"):
+            _poll.emit(on_event, {"event": "running", "instance_uuid": instance_uuid})
+            return {
+                "instance_uuid": instance_uuid,
+                "status": status,
+                "waited_seconds": round(_poll.now() - started, 1),
+                "instance": entry,
+            }
+        if until == "shutdown" and folded == "shutdown":
+            _poll.emit(on_event, {"event": "shutdown", "instance_uuid": instance_uuid})
+            return {
+                "instance_uuid": instance_uuid,
+                "status": status,
+                "waited_seconds": round(_poll.now() - started, 1),
+                "instance": entry,
+            }
+        if folded in FAILED_INSTANCE_STATUSES:
+            raise APIError(f"Instance {instance_uuid} entered status {status!r} while waiting for {until}")
+
+        timeout_reason = f"waiting for instance {instance_uuid} to reach {until} (last status: {last_status!r})"
+        _poll.raise_if_timed_out(deadline, timeout=timeout, reason=timeout_reason)
+        _poll.sleep(interval)

@@ -2090,3 +2090,383 @@ def test_cancel_shutdown_api_failure_is_a_clean_click_exception(home: Path, monk
     assert result.exit_code == 1
     assert "token expired" in result.output
     assert "Traceback" not in result.output
+
+
+WAIT_RECORD = {
+    "instance_uuid": INSTANCE_UUID,
+    "status": "running",
+    "waited_seconds": 5.0,
+    "instance": {"uuid": INSTANCE_UUID, "status": "running"},
+}
+
+IMAGE_WAIT_RECORD = {
+    "image_uuid": "image-new",
+    "image_id": 9001,
+    "name": "save-image-test1",
+    "status": "finished",
+    "waited_seconds": 5.0,
+    "image": {"id": 9001, "status": "finished", "name": "save-image-test1"},
+}
+
+
+def test_wait_forwards_options_and_returns_json(home: Path, monkeypatch) -> None:
+    """``--until``, ``--interval``, ``--timeout``, and ``--retry`` reach the handler."""
+    _seed_token()
+    captured: dict[str, object] = {}
+
+    def fake_wait_for_instance(client, instance_uuid, **kwargs):
+        captured["instance_uuid"] = instance_uuid
+        captured.update(kwargs)
+        return WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait_for_instance)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "wait",
+            INSTANCE_UUID,
+            "--until",
+            "shutdown",
+            "--interval",
+            "5",
+            "--timeout",
+            "30",
+            "--retry",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "instance_uuid": INSTANCE_UUID,
+        "until": "shutdown",
+        "interval": 5.0,
+        "timeout": 30.0,
+        "retry": 2,
+        "on_event": None,
+    }
+    assert json.loads(result.output) == WAIT_RECORD
+    assert TOKEN not in result.output
+
+
+def test_wait_human_output_renders_events_and_final_status(home: Path, monkeypatch) -> None:
+    """Progress events are printed in text mode, then a final success line."""
+
+    def fake_wait_for_instance(client, instance_uuid, **kwargs):
+        callback = kwargs["on_event"]
+        callback({"event": "instance_status", "instance_uuid": instance_uuid, "status": "not found"})
+        callback({"event": "instance_status", "instance_uuid": instance_uuid, "status": "creating"})
+        callback({"event": "poll_failed", "error": "boom", "retries": 1, "limit": 1})
+        callback({"event": "instance_status", "instance_uuid": instance_uuid, "status": "running"})
+        callback({"event": "running", "instance_uuid": instance_uuid})
+        return WAIT_RECORD
+
+    _seed_token()
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait_for_instance)
+
+    result = CliRunner().invoke(main, ["instance", "wait", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert "Instance status: not visible yet." in result.output
+    assert "Instance status: creating." in result.output
+    assert "Poll failed: boom; retrying (1/1)." in result.output
+    assert f"Instance {INSTANCE_UUID} is running." in result.output
+    assert f"Instance {INSTANCE_UUID} reached status 'running' after 5s." in result.output
+
+
+def test_wait_timeout_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """A handler timeout exits 1 without a traceback."""
+    _seed_token()
+
+    def failing_wait(client, instance_uuid, **kwargs):
+        raise TimeoutError("Timed out after 1s waiting for instance")
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", failing_wait)
+
+    result = CliRunner().invoke(main, ["instance", "wait", INSTANCE_UUID, "--timeout", "1"])
+
+    assert result.exit_code == 1
+    assert "Timed out after 1s waiting for instance" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_power_on_wait_merges_json_and_uses_defaults(home: Path, monkeypatch) -> None:
+    """``--wait`` resolves the tuning defaults and merges the wait result into JSON."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    record = {"instance_uuid": INSTANCE_UUID, "powered_on": True, "non_gpu": False}
+
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda client, instance_id, *, non_gpu=False: record,
+    )
+
+    def fake_wait(client, instance_uuid, **kwargs):
+        captured["instance_uuid"] = instance_uuid
+        captured.update(kwargs)
+        return WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait)
+
+    result = CliRunner().invoke(main, ["--json", "instance", "power-on", INSTANCE_UUID, "--wait"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "instance_uuid": INSTANCE_UUID,
+        "interval": 10.0,
+        "timeout": 0.0,
+        "retry": 0,
+        "on_event": None,
+    }
+    assert json.loads(result.output) == {
+        **record,
+        "status": "running",
+        "waited_seconds": 5.0,
+        "instance": {"uuid": INSTANCE_UUID, "status": "running"},
+    }
+
+
+def test_power_on_wait_human_output_keeps_messages(home: Path, monkeypatch) -> None:
+    """The existing power-on success message stays, followed by the final status."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda client, instance_id, *, non_gpu=False: {
+            "instance_uuid": instance_id,
+            "powered_on": True,
+            "non_gpu": non_gpu,
+        },
+    )
+
+    def fake_wait(client, instance_uuid, **kwargs):
+        kwargs["on_event"]({"event": "running", "instance_uuid": instance_uuid})
+        return WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait)
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID, "--wait"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Power-on requested for instance {INSTANCE_UUID}." in result.output
+    assert f"Instance {INSTANCE_UUID} is running." in result.output
+    assert f"Instance {INSTANCE_UUID} reached status 'running' after 5s." in result.output
+
+
+def test_power_on_without_wait_does_not_poll(home: Path, monkeypatch) -> None:
+    """Without ``--wait`` the handler is called once and no wait loop starts."""
+    _seed_token()
+    record = {"instance_uuid": INSTANCE_UUID, "powered_on": True, "non_gpu": False}
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda client, instance_id, *, non_gpu=False: record,
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "wait_for_instance",
+        lambda *args, **kwargs: pytest.fail("the wait loop must not start without --wait"),
+    )
+
+    result = CliRunner().invoke(main, ["--json", "instance", "power-on", INSTANCE_UUID])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == record
+
+
+@pytest.mark.parametrize("option", [["--interval", "5"], ["--timeout", "10"], ["--retry", "2"]])
+def test_wait_tuning_options_require_wait(home: Path, monkeypatch, option: list[str]) -> None:
+    """A tuning option without ``--wait`` is a usage error."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "power_on",
+        lambda *args, **kwargs: pytest.fail("the handler must not run for a usage error"),
+    )
+
+    result = CliRunner().invoke(main, ["instance", "power-on", INSTANCE_UUID, *option])
+
+    assert result.exit_code == 2
+    assert "--interval/--timeout/--retry require --wait." in result.output
+
+
+def test_create_wait_merges_json_and_forwards_resolved_options(home: Path, monkeypatch) -> None:
+    """``create --wait`` waits for the new instance and merges its status."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "create_instance",
+        lambda client, **kwargs: CREATE_RECORD,
+    )
+
+    def fake_wait(client, instance_uuid, **kwargs):
+        captured["instance_uuid"] = instance_uuid
+        captured.update(kwargs)
+        return WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "create",
+            "--machine-id",
+            CREATE_MACHINE_ID,
+            "--image",
+            CREATE_BASE_IMAGE_UUID,
+            "--wait",
+            "--interval",
+            "3",
+            "--timeout",
+            "60",
+            "--retry",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "instance_uuid": CREATE_INSTANCE_UUID,
+        "interval": 3.0,
+        "timeout": 60.0,
+        "retry": 1,
+        "on_event": None,
+    }
+    assert json.loads(result.output) == {
+        **CREATE_RECORD,
+        "status": "running",
+        "waited_seconds": 5.0,
+        "instance": {"uuid": INSTANCE_UUID, "status": "running"},
+    }
+
+
+def test_clone_wait_merges_json_and_forwards_events(home: Path, monkeypatch) -> None:
+    """``clone --wait`` waits for the clone and passes the text-mode callback."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "resolve_clone_source",
+        lambda client, instance_uuid: CLONE_SOURCE,
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "clone_instance",
+        lambda client, instance_uuid, **kwargs: CLONE_RECORD,
+    )
+
+    def fake_wait(client, instance_uuid, **kwargs):
+        captured["instance_uuid"] = instance_uuid
+        captured.update(kwargs)
+        return WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.instance_handler, "wait_for_instance", fake_wait)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "instance",
+            "clone",
+            CLONE_SOURCE_UUID,
+            "--machine-id",
+            CLONE_MACHINE_ID,
+            "--wait",
+            "--retry",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["instance_uuid"] == CLONE_NEW_UUID
+    assert captured["interval"] == 10.0
+    assert captured["timeout"] == 0.0
+    assert captured["retry"] == 2
+    assert captured["on_event"] is None
+    assert json.loads(result.output)["status"] == "running"
+    assert json.loads(result.output)["instance"] == {"uuid": INSTANCE_UUID, "status": "running"}
+
+
+def test_save_image_wait_snapshots_before_saving(home: Path, monkeypatch) -> None:
+    """The previous-status snapshot is taken before the save request."""
+    _seed_token()
+    order: list[tuple[str, object]] = []
+
+    def fake_snapshot(client, instance_uuid, image_name):
+        order.append(("snapshot", (instance_uuid, image_name)))
+        return {9001: "saving"}
+
+    def fake_save_image(client, instance_id, image_name, *, try_again):
+        order.append(("save", (instance_id, image_name, try_again)))
+        return {
+            "instance_uuid": instance_id,
+            "image_name": image_name,
+            "try_again": try_again,
+            "saved": True,
+        }
+
+    def fake_wait(client, **kwargs):
+        order.append(("wait", kwargs["previous_statuses"]))
+        return IMAGE_WAIT_RECORD
+
+    monkeypatch.setattr(instance_commands.image_handler, "private_image_status_snapshot", fake_snapshot)
+    monkeypatch.setattr(instance_commands.instance_handler, "save_image", fake_save_image)
+    monkeypatch.setattr(instance_commands.image_handler, "wait_for_private_image", fake_wait)
+
+    result = CliRunner().invoke(
+        main,
+        ["--json", "instance", "save-image", INSTANCE_UUID, "save-image-test1", "--try-again", "--wait"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert order == [
+        ("snapshot", (INSTANCE_UUID, "save-image-test1")),
+        ("save", (INSTANCE_UUID, "save-image-test1", True)),
+        ("wait", {9001: "saving"}),
+    ]
+    payload = json.loads(result.output)
+    assert payload["saved"] is True
+    assert payload["status"] == "finished"
+    assert payload["waited_seconds"] == 5.0
+    assert payload["image"] == IMAGE_WAIT_RECORD["image"]
+
+
+def test_save_image_wait_timeout_is_a_clean_click_exception(home: Path, monkeypatch) -> None:
+    """A timeout while waiting for the image exits 1 without a traceback."""
+    _seed_token()
+    monkeypatch.setattr(
+        instance_commands.image_handler,
+        "private_image_status_snapshot",
+        lambda client, instance_uuid, image_name: {},
+    )
+    monkeypatch.setattr(
+        instance_commands.instance_handler,
+        "save_image",
+        lambda client, instance_id, image_name, *, try_again: {
+            "instance_uuid": instance_id,
+            "image_name": image_name,
+            "try_again": try_again,
+            "saved": True,
+        },
+    )
+
+    def failing_wait(client, **kwargs):
+        raise TimeoutError("Timed out after 1s waiting for image")
+
+    monkeypatch.setattr(instance_commands.image_handler, "wait_for_private_image", failing_wait)
+
+    result = CliRunner().invoke(
+        main,
+        ["instance", "save-image", INSTANCE_UUID, "save-image-test1", "--wait", "--timeout", "1"],
+    )
+
+    assert result.exit_code == 1
+    assert "Timed out after 1s waiting for image" in result.output
+    assert "Traceback" not in result.output

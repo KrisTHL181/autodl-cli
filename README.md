@@ -201,8 +201,11 @@ autodl instance list
 autodl instance list --status running -q 4090
 autodl instance list --unbind-sub-user
 autodl instance detail <instance-uuid>
+autodl instance wait <instance-uuid>
+autodl instance wait <instance-uuid> --until shutdown --timeout 600
 autodl instance power-on <instance-uuid>
 autodl instance power-on <instance-uuid> --non-gpu
+autodl instance power-on <instance-uuid> --wait
 autodl instance power-off <instance-uuid>
 autodl instance schedule-shutdown <instance-uuid> --at "2026-11-13 00:00"
 autodl instance schedule-shutdown <instance-uuid> --in 4h
@@ -216,11 +219,14 @@ autodl instance release <instance-uuid>
 autodl instance release <instance-uuid> --yes
 autodl instance save-image <instance-uuid> my-image
 autodl instance save-image <instance-uuid> my-image --try-again
+autodl instance save-image <instance-uuid> my-image --wait
 autodl instance create --machine-id 1c0641804d --image base-image-ee43618uo7
+autodl instance create --machine-id 1c0641804d --image base-image-ee43618uo7 --wait
 autodl instance create --region nm-B2 --gpu "RTX 3090" --image base-image-ee43618uo7
 autodl instance create --machine-id 1c0641804d --private-image image-abcd1234 \
   --gpu-num 2 --name trainer --data-disk 50
 autodl instance clone <instance-uuid> --machine-id 1c0641804d
+autodl instance clone <instance-uuid> --machine-id 1c0641804d --wait
 autodl instance clone <instance-uuid> --region nm-B2 --gpu "RTX 3090"
 autodl instance clone <instance-uuid> --machine-id 1c0641804d --gpu-num 2 \
   --name clone --data-disk 50 --no-copy-data-disk
@@ -244,6 +250,22 @@ immediately; it is irreversible, so the command asks for confirmation unless
 `--yes` is passed. `save-image` posts to
 `/api/v1/instance/image/save`; AutoDL accepts the request immediately, and the
 image appears under the account's private images once the save finishes.
+
+`instance wait` polls the instance list until the instance reaches `--until
+running` (the default), `shutdown`, or `released`. `released` also succeeds when
+the instance has disappeared from the list. `running` also accepts the CPU-only
+`cpu` start mode used by `power-on --non-gpu`, because that instance is ready to
+use even though it has no GPU cards. `--interval` sets the seconds
+between checks (default 10), `--timeout` gives up after that many seconds
+(default 0, meaning no deadline, so it waits until interrupted), and `--retry`
+retries that many consecutive transient API errors (default 0). `power-on`,
+`create`, `clone`, and `save-image` accept the same tuning options behind a
+`--wait` switch: after their usual output they wait for the instance to report
+`running`, or for the image save to report `finished`. `--interval`, `--timeout`,
+and `--retry` are rejected unless `--wait` is also passed. `save-image --wait`
+snapshots the private images matching the instance and image name before sending
+the save request, so `--try-again` ignores the older finished or failed entry
+and waits for the new save.
 
 `schedule-shutdown` posts to `/api/v1/instance/timed/shutdown` to power the
 instance off automatically later. Pass exactly one of `--at` (an absolute time
