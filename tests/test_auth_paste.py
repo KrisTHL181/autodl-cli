@@ -167,6 +167,8 @@ def test_paste_verified_json_output(home: Path, monkeypatch) -> None:
         "verified": True,
         "user": USER,
         "device_fingerprint_saved": True,
+        "profile": "default",
+        "profile_path": str(home / "profiles" / "default.toml"),
         "config_path": str(home / "config.toml"),
     }
     assert JWT not in result.output
@@ -222,6 +224,8 @@ def test_paste_fingerprint_only_preserves_token(home: Path) -> None:
         "verified": False,
         "user": None,
         "device_fingerprint_saved": True,
+        "profile": "default",
+        "profile_path": str(home / "profiles" / "default.toml"),
         "config_path": str(home / "config.toml"),
     }
     saved = config_module.load_config()
@@ -375,3 +379,5 @@ def test_paste_bare_fingerprint_still_exits_zero_with_warning(home: Path) -> Non
     assert "pre-login" not in result.output
     assert "Run `autodl auth login`" not in result.output
     assert config_module.load_config() == {"device_fingerprint": FINGERPRINT}
+    assert not (home / "profiles" / "default.toml").exists()
+    assert not (home / "active_profile").exists()

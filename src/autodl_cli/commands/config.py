@@ -15,6 +15,7 @@ import click
 
 from autodl_cli import output
 from autodl_cli.config import (
+    current_profile,
     get_app_version,
     get_base_url,
     get_device_fingerprint,
@@ -46,6 +47,8 @@ class _Item:
     :param show_none_msg: Message shown by ``show`` when the value is ``None``.
     :param clear_msg: Overrides the ``clear`` success message.
     :param secret: Whether the value must be masked in every output.
+    :param profile_scoped: Whether the value belongs to the effective profile
+        rather than the global config.
     """
 
     name: str
@@ -60,6 +63,7 @@ class _Item:
     show_none_msg: str | None = None
     clear_msg: str | None = None
     secret: bool = False
+    profile_scoped: bool = False
 
     @property
     def key(self) -> str:
@@ -90,6 +94,16 @@ class _Item:
         if self.secret and isinstance(value, str):
             return _mask(value)
         return value
+
+    def _scope(self) -> str:
+        """Return a suffix naming the effective profile.
+
+        :returns: ``" (profile <name>)"`` for profile-scoped items, otherwise
+            an empty string.
+        """
+        if not self.profile_scoped:
+            return ""
+        return f" (profile {current_profile()[0]})"
 
 
 def _mask(value: str) -> str:
@@ -139,7 +153,7 @@ def _register_item(config_group: click.Group, item: _Item) -> None:
         if _as_json(ctx):
             output.render_json({item.key: item._json_value(current)})
             return
-        output.success(f"{item.display} set to: {item._display(current)}")
+        output.success(f"{item.display} set to: {item._display(current)}{item._scope()}")
 
     cmd_set.help = f"Set the {item.display.lower()}."
 
@@ -153,8 +167,10 @@ def _register_item(config_group: click.Group, item: _Item) -> None:
             return
         if value is None and item.show_none_msg:
             output.info(item.show_none_msg)
+            if item.profile_scoped:
+                output.info(f"Profile: {current_profile()[0]}")
             return
-        output.info(f"{item.label}: {item._display(value)}")
+        output.info(f"{item.label}: {item._display(value)}{item._scope()}")
 
     cmd_show.help = f"Show the current {item.display.lower()}."
 
@@ -169,9 +185,9 @@ def _register_item(config_group: click.Group, item: _Item) -> None:
             output.render_json({item.key: item._json_value(current)})
             return
         if item.clear_msg:
-            output.success(item.clear_msg)
+            output.success(f"{item.clear_msg}{item._scope()}")
             return
-        output.success(f"{item.display} reset to: {item._display(current)}")
+        output.success(f"{item.display} reset to: {item._display(current)}{item._scope()}")
 
     cmd_clear.help = f"Reset {item.display.lower()} to its default."
 
@@ -184,13 +200,18 @@ _CONFIG_ITEMS: list[_Item] = [
         getter=get_token,
         setter=set_token,
         secret=True,
+        profile_scoped=True,
         show_none_msg="No API token configured (run `autodl auth paste`).",
         clear_msg="API token cleared (run `autodl auth paste` to authenticate again).",
         group_help="""Manage the stored AutoDL API token.
 
 The token is normally managed by `autodl auth login` and `autodl auth paste`;
 use this group to inspect or replace it directly. The value is masked in every
-command's output.""",
+command's output.
+
+The token belongs to the effective profile. Use `--profile NAME`, the
+`AUTODL_PROFILE` environment variable, or `autodl profile switch` to choose a
+different account.""",
     ),
     _Item(
         name="device-fingerprint",
@@ -211,9 +232,13 @@ saved by `autodl auth paste` from a browser login request.""",
         label="Phone area",
         getter=get_phone_area,
         setter=set_phone_area,
+        profile_scoped=True,
         group_help="""Manage the default phone area prefix for `autodl auth login`.
 
-`autodl auth login` uses this value when `--phone-area` is omitted.""",
+`autodl auth login` uses this value when `--phone-area` is omitted.
+
+The value belongs to the effective profile, so each account can keep its own
+prefix.""",
     ),
     _Item(
         name="base-url",

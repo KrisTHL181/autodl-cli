@@ -60,6 +60,8 @@ def test_login_json_success_persists_token(home: Path, monkeypatch) -> None:
     assert payload == {
         "authenticated": True,
         "user": USER,
+        "profile": "default",
+        "profile_path": str(home / "profiles" / "default.toml"),
         "config_path": str(home / "config.toml"),
     }
     assert TOKEN not in result.output
@@ -68,6 +70,7 @@ def test_login_json_success_persists_token(home: Path, monkeypatch) -> None:
     assert saved["token"] == TOKEN
     assert saved["phone_area"] == "+86"
     assert saved["device_fingerprint"] == STORED_FINGERPRINT
+    assert (home / "active_profile").read_text().strip() == "default"
 
 
 def test_login_reuses_stored_fingerprint_and_preserves_config(home: Path, monkeypatch) -> None:

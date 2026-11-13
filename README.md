@@ -48,8 +48,9 @@ pip install -e .
 
 ### 1. Authenticate
 
-Credentials land in `~/.autodl-cli/config.toml` (mode `0600`). Only the API token
-and the device fingerprint are stored — never a password.
+Credentials land in `~/.autodl-cli/profiles/<name>.toml` (mode `0600`); the
+device fingerprint and global settings live in `~/.autodl-cli/config.toml`.
+Only the API token and the device fingerprint are stored — never a password.
 
 ```bash
 # Paste a cURL command, an `Authorization:` line, a JSON blob, or a HAR file
@@ -73,6 +74,43 @@ fingerprint even when the request carries no token yet.
 ```bash
 autodl account me          # who am I?
 autodl account balance     # how much credit is left?
+```
+
+---
+
+## 👥 Profiles
+
+Profiles are local credential sets, so one machine can switch AutoDL accounts
+without pasting a token again. `auth login` and `auth paste` store credentials
+in the effective profile and make it active.
+
+```bash
+autodl profile list          # every profile, the active one, and whether it has a token
+autodl profile current       # effective profile and where the selection came from
+autodl profile switch work   # activate an existing profile
+autodl profile delete work   # delete it (asks first; --yes in scripts)
+```
+
+Select a profile per command with the global `--profile` flag, or through the
+`AUTODL_PROFILE` environment variable. The precedence is:
+`--profile` > `AUTODL_PROFILE` > `active_profile` file > `default`.
+
+```bash
+autodl --profile work account me
+AUTODL_PROFILE=work autodl account balance
+autodl --profile work --json instance list
+```
+
+Global settings such as the device fingerprint, base URL, timeout, and
+`AppVersion` are shared by every profile; only the token and phone area are
+per-profile. If an older install still has `token` or `phone_area` in
+`config.toml`, the CLI moves them to `profiles/default.toml` and records
+`default` as active the first time it runs.
+
+```bash
+# Create a second profile without losing the first.
+autodl --profile work auth paste
+autodl profile list
 ```
 
 ---
@@ -456,7 +494,7 @@ src/autodl_cli/
 ├── main.py                # Click root group; registers every command group
 ├── api.py                 # public Python SDK facade
 ├── client.py              # httpx client — auth, AppVersion header, error mapping
-├── config.py              # read/write ~/.autodl-cli/config.toml (atomic, 0600)
+├── config.py              # global settings + per-profile credential files (atomic, 0600)
 ├── paths.py               # the data directory, resolved in one place
 ├── errors.py              # AutoDLError hierarchy
 ├── output.py              # all Rich rendering and --json output
@@ -468,6 +506,7 @@ src/autodl_cli/
 │   ├── image.py
 │   ├── instance.py
 │   ├── nfs.py
+│   ├── profile.py
 │   ├── tools.py
 │   └── config.py
 ├── handlers/              # one module per domain; return plain dicts
@@ -500,7 +539,7 @@ AutoDL web API (reverse-engineered)
 
 | Layer | What It Does |
 |---|---|
-| **🔐 Auth** | Stores a browser JWT and device fingerprint, or logs in with a phone number and password. Writes are atomic and private to the user |
+| **🔐 Auth** | Stores a browser JWT per profile and a shared device fingerprint, or logs in with a phone number and password. Writes are atomic and private to the user |
 | **🌐 Client** | Adds the mandatory `AppVersion` header, attaches the bearer token, maps HTTP and transport failures onto `AutoDLError` subclasses |
 | **🧩 Handlers** | Translate API responses into plain dicts. Never print, never read environment variables, so `api.py` and the MCP server can reuse them |
 | **🎨 Output** | Owns every Rich style, table, and JSON dump. Commands never print directly |
@@ -535,7 +574,10 @@ _AUTODL_COMPLETE=fish_source autodl | source
 
 ```
 ~/.autodl-cli/
-└── config.toml     # API token, device fingerprint, phone area
+├── config.toml      # global settings: device fingerprint, base URL, timeout
+├── active_profile   # plain-text name of the active profile
+└── profiles/
+    └── default.toml # per-profile token and phone area
 ```
 
 `AUTODL_CLI_HOME` relocates the whole tree, which is how the test suite keeps its

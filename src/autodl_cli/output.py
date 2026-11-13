@@ -157,6 +157,49 @@ def render_table(rows: Sequence[dict[str, object]], columns: Sequence[str]) -> N
     console.print(table)
 
 
+def render_profiles(profiles: Sequence[Mapping[str, object]]) -> None:
+    """Render saved account profiles as a Rich table.
+
+    The effective profile is marked in the Active column; the Token column says
+    whether that profile stores a usable token.
+
+    :param profiles: Mappings with ``name``, ``active``, and ``authenticated``
+        keys, as produced by ``autodl profile list``.
+    """
+    if not profiles:
+        console.print("No profiles found.", style=_STYLE_META)
+        return
+
+    table = _table("Profiles")
+    table.add_column("Profile")
+    table.add_column("Active")
+    table.add_column("Token")
+    for entry in profiles:
+        name = _format_value(entry.get("name"))
+        active = entry.get("active") is True
+        authenticated = entry.get("authenticated") is True
+        table.add_row(
+            Text(name, style=_STYLE_LABEL),
+            Text("yes", style=_STYLE_OK) if active else Text("", style=_STYLE_META),
+            Text("yes", style=_STYLE_OK) if authenticated else Text("no", style=_STYLE_WARN),
+        )
+    console.print(table)
+
+
+def render_profile(name: str, source: str) -> None:
+    """Render the effective profile and the origin of its selection.
+
+    :param name: Effective profile name.
+    :param source: One of ``flag``, ``env``, ``active``, or ``default``.
+    """
+    table = _table("Active profile")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row(_styled("Profile", _STYLE_LABEL), _styled(name, _STYLE_OK))
+    table.add_row(_styled("Source", _STYLE_LABEL), _styled(source, _STYLE_COLUMN))
+    console.print(table)
+
+
 #: Display labels for the wallet fields, in display order.
 _BALANCE_LABELS: tuple[tuple[str, str], ...] = (
     ("assets", "Available"),

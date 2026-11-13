@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import click
 
 from autodl_cli.client import AutoDLClient
-from autodl_cli.config import get_app_version, get_base_url, get_timeout
+from autodl_cli.config import DEFAULT_PROFILE, current_profile, get_app_version, get_base_url, get_timeout
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -42,4 +42,11 @@ def require_token(config: dict[str, object]) -> str:
     token = config.get("token")
     if isinstance(token, str) and token:
         return token
-    raise click.ClickException("Not authenticated. Run `autodl auth paste` first.")
+    try:
+        profile_name = current_profile()[0]
+    except ValueError:
+        profile_name = DEFAULT_PROFILE
+    raise click.ClickException(
+        f"Not authenticated for profile '{profile_name}'. Run `autodl auth paste` first, "
+        "or choose another account with `--profile NAME`."
+    )

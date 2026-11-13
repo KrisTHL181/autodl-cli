@@ -17,7 +17,15 @@ import click
 
 from autodl_cli import output
 from autodl_cli.commands._helpers import build_client
-from autodl_cli.config import config_path, get_phone_area, load_config, save_config
+from autodl_cli.config import (
+    config_path,
+    current_profile,
+    get_phone_area,
+    load_config,
+    profile_path,
+    save_config,
+    set_active_profile,
+)
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import auth as auth_handler
 
@@ -271,6 +279,7 @@ def login(ctx: click.Context, phone: str, phone_area: str | None, password: str)
         rejects the credentials.
     """
     config = load_config()
+    profile_name = current_profile()[0]
     fingerprint = _resolve_fingerprint(config)
     phone_area = phone_area or get_phone_area(config)
 
@@ -290,6 +299,7 @@ def login(ctx: click.Context, phone: str, phone_area: str | None, password: str)
     config["phone_area"] = phone_area
     config["device_fingerprint"] = result.get("device_fingerprint") or fingerprint
     save_config(config)
+    set_active_profile(profile_name)
 
     user = result.get("user")
     if ctx.obj and ctx.obj.get("json"):
@@ -297,6 +307,8 @@ def login(ctx: click.Context, phone: str, phone_area: str | None, password: str)
             {
                 "authenticated": True,
                 "user": user,
+                "profile": profile_name,
+                "profile_path": str(profile_path(profile_name)),
                 "config_path": str(config_path()),
             }
         )
@@ -304,7 +316,8 @@ def login(ctx: click.Context, phone: str, phone_area: str | None, password: str)
 
     username, uid = _user_identity(user)
     output.success(f"Logged in as {username} (uid {uid})")
-    output.info(f"Token saved to {config_path()}")
+    output.info(f"Profile: {profile_name}")
+    output.info(f"Token saved to {profile_path(profile_name)}")
 
 
 @auth.command("paste", help="Save a token and device fingerprint copied from the browser.")
@@ -332,6 +345,7 @@ def paste(ctx: click.Context, no_verify: bool) -> None:
 
     token = credentials.get("token")
     fingerprint = credentials.get("device_fingerprint")
+    profile_name = current_profile()[0]
 
     if not token and _looks_like_pre_login_request(text):
         if fingerprint:
@@ -363,6 +377,8 @@ def paste(ctx: click.Context, no_verify: bool) -> None:
     if fingerprint:
         config["device_fingerprint"] = fingerprint
     save_config(config)
+    if token:
+        set_active_profile(profile_name)
 
     if ctx.obj and ctx.obj.get("json"):
         output.render_json(
@@ -371,6 +387,8 @@ def paste(ctx: click.Context, no_verify: bool) -> None:
                 "verified": user is not None,
                 "user": user,
                 "device_fingerprint_saved": bool(fingerprint),
+                "profile": profile_name,
+                "profile_path": str(profile_path(profile_name)),
                 "config_path": str(config_path()),
             }
         )
@@ -389,6 +407,7 @@ def paste(ctx: click.Context, no_verify: bool) -> None:
         output.warning("No device fingerprint found; `autodl auth login` needs one.")
     if fingerprint and not token:
         output.warning("No API token found; authenticated commands need one.")
+    output.info(f"Profile: {profile_name}")
     output.info(f"Config: {config_path()}")
 
 
