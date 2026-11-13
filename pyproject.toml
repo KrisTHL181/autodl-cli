@@ -39,6 +39,10 @@ dependencies = [
 mcp = [
     "click2mcp>=0.1.0",
 ]
+# desktop-notifier powers `tools snipe --notify` on Linux, macOS, and Windows.
+notify = [
+    "desktop-notifier>=6.0",
+]
 test = [
     "pytest>=8",
 ]

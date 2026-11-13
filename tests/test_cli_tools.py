@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from autodl_cli import config as config_module
 from autodl_cli.commands import tools as tools_commands
+from autodl_cli.errors import AuthError, AutoDLError
 from autodl_cli.main import main
 
 TOKEN = "fake-token"
@@ -694,6 +695,10 @@ def test_snipe_help_lists_its_options(home: Path) -> None:
     assert "--strategy" in result.output
     assert "--parallel" in result.output
     assert "--count" in result.output
+    assert "--notify" in result.output
+    assert "--no-notify" in result.output
+    assert "--notify-webhook" in result.output
+    assert "--config" in result.output
 
 
 def test_snipe_clone_forwards_its_options(home: Path, monkeypatch) -> None:
@@ -811,3 +816,739 @@ def test_snipe_renders_clone_found_event(home: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Found RTX 3090 on machine m-1 (西北B区); cloning..." in result.output
+
+
+class _RecordingNotifier:
+    """Stand-in for :class:`autodl_cli.utils.notify.Notifier` that records sends."""
+
+    instances: list[_RecordingNotifier] = []
+    warnings: tuple[str, ...] = ()
+
+    def __init__(self, *, desktop: bool = False, webhooks=()) -> None:
+        """Store the channel configuration.
+
+        :param desktop: Whether desktop notifications are enabled.
+        :param webhooks: Configured webhook URLs.
+        """
+        self.desktop = desktop
+        self.webhooks = tuple(webhooks)
+        self.sent: list[tuple[str, str, str, dict[str, object]]] = []
+        type(self).instances.append(self)
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether a channel is configured.
+
+        :returns: ``True`` when desktop notifications or a webhook are enabled.
+        """
+        return self.desktop or bool(self.webhooks)
+
+    def send(self, event: str, title: str, body: str, **fields: object) -> list[str]:
+        """Record one notification and return configured warnings.
+
+        :param event: Event name.
+        :param title: Notification title.
+        :param body: Notification body.
+        :param fields: Extra webhook data.
+        :returns: Warnings configured through the ``warnings`` attribute.
+        """
+        self.sent.append((event, title, body, fields))
+        return list(type(self).warnings)
+
+
+def _patch_notifier(monkeypatch) -> type[_RecordingNotifier]:
+    """Replace the command's ``Notifier`` with a recording stand-in.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    :returns: The recording class; its ``instances`` list receives each notifier.
+    """
+    monkeypatch.setattr(tools_commands, "Notifier", _RecordingNotifier)
+    monkeypatch.setattr(_RecordingNotifier, "instances", [])
+    monkeypatch.setattr(_RecordingNotifier, "warnings", ())
+    return _RecordingNotifier
+
+
+def _write_snipe_config(tmp_path: Path, text: str) -> Path:
+    """Write a snipe TOML template.
+
+    :param tmp_path: Directory that receives the file.
+    :param text: TOML source.
+    :returns: The written path.
+    """
+    path = tmp_path / "snipe.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_snipe_config_supplies_defaults(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """A template supplies every option and enables notifications."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    recorder = _patch_notifier(monkeypatch)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+region = ["nm-B2"]
+gpu = ["RTX 4090"]
+gpu_num = 2
+max_price = 1.8
+strategy = "idle"
+parallel = 2
+count = 1
+image = "base-image-x"
+name = "trainer"
+data_disk = 50
+interval = 5
+timeout = 600
+retry = 3
+copy_data_disk = true
+notify = true
+notify_webhook = ["https://example.test/hook"]
+""",
+    )
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["regions"] == ("nm-B2",)
+    assert captured["gpu_types"] == ("RTX 4090",)
+    assert captured["gpu_amount"] == 2
+    assert captured["max_price"] == 1.8
+    assert captured["strategy"] == "idle"
+    assert captured["parallel"] == 2
+    assert captured["count"] == 1
+    assert captured["base_image_uuid"] == "base-image-x"
+    assert captured["instance_name"] == "trainer"
+    assert captured["expand_data_disk"] == 50
+    assert captured["interval"] == 5
+    assert captured["timeout"] == 600
+    assert captured["retry"] == 3
+    assert captured["copy_data_disk"] is True
+
+    notifier = recorder.instances[0]
+    assert notifier.desktop is True
+    assert notifier.webhooks == ("https://example.test/hook",)
+
+
+def test_snipe_cli_options_override_config(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """Values supplied on the command line win over the template."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    recorder = _patch_notifier(monkeypatch)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+region = "nm-B2"
+gpu = "RTX 4090"
+gpu_num = 2
+strategy = "first"
+image = "base-image-config"
+notify = true
+""",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--config",
+            str(config),
+            "--gpu-num",
+            "4",
+            "--strategy",
+            "price",
+            "--image",
+            "base-image-cli",
+            "--no-notify",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["gpu_types"] == ("RTX 4090",)
+    assert captured["gpu_amount"] == 4
+    assert captured["strategy"] == "price"
+    assert captured["base_image_uuid"] == "base-image-cli"
+
+    notifier = recorder.instances[0]
+    assert notifier.desktop is False
+    assert notifier.webhooks == ()
+    assert notifier.enabled is False
+
+
+def test_snipe_config_accepts_a_string_for_repeatable_options(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """A scalar string is accepted for a repeatable option."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    recorder = _patch_notifier(monkeypatch)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+region = "nm-B2"
+gpu = "RTX 4090"
+image = "base-image-x"
+notify_webhook = "https://example.test/hook"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["regions"] == ("nm-B2",)
+    assert captured["gpu_types"] == ("RTX 4090",)
+    assert recorder.instances[0].webhooks == ("https://example.test/hook",)
+
+
+def test_snipe_config_accepts_dashed_keys(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """Dashes in config keys are normalised to underscores."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+gpu-num = 2
+max-price = 1.5
+private-image = "image-y"
+copy-data-disk = true
+""",
+    )
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["gpu_amount"] == 2
+    assert captured["max_price"] == 1.5
+    assert captured["private_image_uuid"] == "image-y"
+    assert captured["copy_data_disk"] is True
+
+
+@pytest.mark.parametrize(
+    ("body", "needle"),
+    [
+        ('region = "x"\ngpu = "g"\nimage = "i"\nbogus = 1\n', "bogus"),
+        ('region = "x"\ngpu = "g"\nimage = "i"\ngpu_num = "two"\n', "gpu_num"),
+        ('region = "x"\ngpu = "g"\nimage = "i"\ngpu_num = [1, 2]\n', "gpu_num"),
+        ('region = "x"\ngpu = "g"\nimage = "i"\nstrategy = "fast"\n', "strategy"),
+    ],
+)
+def test_snipe_rejects_invalid_config(
+    home: Path,
+    monkeypatch,
+    tmp_path: Path,
+    body: str,
+    needle: str,
+) -> None:
+    """Unknown keys, bad types, arrays for scalar options, and bad choices fail."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *args, **kwargs: pytest.fail("an invalid template must not reach the handler"),
+    )
+    config = _write_snipe_config(tmp_path, body)
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert needle in result.output
+    assert "--config" in result.output
+
+
+@pytest.mark.parametrize(
+    ("body", "needle"),
+    [
+        ("gpu_num = true", "gpu_num"),
+        ("gpu_num = 2.5", "gpu_num"),
+        ('interval = "fast"', "interval"),
+        ('notify = "yes"', "notify"),
+        ("name = 123", "name"),
+        ("region = 1", "region"),
+        ("region = [1]", "region"),
+        ("notify_webhook = [1]", "notify_webhook"),
+    ],
+)
+def test_snipe_config_rejects_values_of_the_wrong_python_type(
+    home: Path,
+    monkeypatch,
+    tmp_path: Path,
+    body: str,
+    needle: str,
+) -> None:
+    """TOML values must already have the option's declared Python type."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *args, **kwargs: pytest.fail("an invalid template must not reach the handler"),
+    )
+    config = _write_snipe_config(tmp_path, f'gpu = "RTX 4090"\nimage = "base-image-x"\n{body}\n')
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert needle in result.output
+    assert "--config" in result.output
+
+
+def test_snipe_config_clone_conflict_is_a_usage_error(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """The existing clone/image exclusivity check runs after config merging."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *args, **kwargs: pytest.fail("the handler must not run with conflicting images"),
+    )
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+clone = "source-uuid"
+image = "base-image-x"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "Use either --clone or --image/--private-image, not both." in result.output
+
+
+def test_snipe_cli_private_image_replaces_config_image(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """An explicit CLI image choice drops the template's conflicting image."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+image = "base-image-config"
+""",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--config", str(config), "--private-image", "image-x"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["private_image_uuid"] == "image-x"
+    assert captured["base_image_uuid"] == ""
+
+
+def test_snipe_cli_clone_replaces_config_image(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """An explicit ``--clone`` drops the template's conflicting image."""
+    _seed_token()
+    captured: dict[str, object] = {}
+    _patch_snipe(monkeypatch, captured=captured)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+image = "base-image-config"
+""",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--config", str(config), "--clone", "instance-1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["clone_instance_uuid"] == "instance-1"
+    assert captured["base_image_uuid"] == ""
+    assert captured["private_image_uuid"] == ""
+
+
+def test_snipe_webhook_alone_enables_notifications(home: Path, monkeypatch) -> None:
+    """A webhook on its own turns notifications on, including the desktop."""
+    _seed_token()
+    _patch_snipe(monkeypatch)
+    recorder = _patch_notifier(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    notifier = recorder.instances[0]
+    assert notifier.desktop is True
+    assert notifier.webhooks == ("https://example.test/hook",)
+
+
+def test_snipe_cli_webhook_overrides_config_notify_false(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """An explicit ``--notify-webhook`` wins over ``notify = false`` in the template."""
+    _seed_token()
+    _patch_snipe(monkeypatch)
+    recorder = _patch_notifier(monkeypatch)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+image = "base-image-x"
+notify = false
+""",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["tools", "snipe", "--config", str(config), "--notify-webhook", "https://example.test/hook"],
+    )
+
+    assert result.exit_code == 0, result.output
+    notifier = recorder.instances[0]
+    assert notifier.enabled is True
+    assert notifier.desktop is True
+    assert notifier.webhooks == ("https://example.test/hook",)
+
+
+def test_snipe_no_notify_wins_over_config_notify_false_and_webhook(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """An explicit ``--no-notify`` wins over a template and a CLI webhook."""
+    _seed_token()
+    _patch_snipe(monkeypatch)
+    recorder = _patch_notifier(monkeypatch)
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+image = "base-image-x"
+notify = false
+""",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--config",
+            str(config),
+            "--notify-webhook",
+            "https://example.test/hook",
+            "--no-notify",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    notifier = recorder.instances[0]
+    assert notifier.enabled is False
+    assert notifier.webhooks == ()
+
+
+def test_snipe_no_notify_disables_a_webhook(home: Path, monkeypatch) -> None:
+    """``--no-notify`` wins over an explicit webhook."""
+    _seed_token()
+    _patch_snipe(monkeypatch)
+    recorder = _patch_notifier(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+            "--no-notify",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    notifier = recorder.instances[0]
+    assert notifier.enabled is False
+    assert notifier.webhooks == ()
+
+
+def test_snipe_rejects_invalid_webhook_url_without_echoing_it(home: Path, monkeypatch) -> None:
+    """A non-HTTP webhook URL is a usage error that does not repeat the value."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *args, **kwargs: pytest.fail("an invalid webhook must not reach the handler"),
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "ftp://example.test/secret",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "absolute http" in result.output
+    assert "ftp://" not in result.output
+
+
+def test_snipe_rejects_invalid_webhook_url_from_config(home: Path, monkeypatch, tmp_path: Path) -> None:
+    """Webhook URLs from a template are validated the same way."""
+    _seed_token()
+    monkeypatch.setattr(
+        tools_commands.snipe_handler,
+        "snipe",
+        lambda *args, **kwargs: pytest.fail("an invalid webhook must not reach the handler"),
+    )
+    config = _write_snipe_config(
+        tmp_path,
+        """
+gpu = "RTX 4090"
+image = "base-image-x"
+notify_webhook = "not-a-url"
+""",
+    )
+
+    result = CliRunner().invoke(main, ["tools", "snipe", "--config", str(config)])
+
+    assert result.exit_code == 2
+    assert "absolute http" in result.output
+    assert "not-a-url" not in result.output
+
+
+def test_snipe_notifies_for_ordered_and_running_events(home: Path, monkeypatch) -> None:
+    """Kept orders and running instances notify; surplus orders do not."""
+    _seed_token()
+    monkeypatch.setattr(tools_commands.output.console, "width", 200)
+    _patch_snipe(monkeypatch, events=True)
+    recorder = _patch_notifier(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    sent = recorder.instances[0].sent
+    assert [item[0] for item in sent] == ["snipe.ordered", "snipe.running"]
+
+    event, title, body, fields = sent[0]
+    assert event == "snipe.ordered"
+    assert title == "GPU ordered"
+    assert body == "Instance snipe-instance-1 ordered on machine m-1 in 西北B区 (RTX 3090)"
+    assert fields == {
+        "instance_uuid": "snipe-instance-1",
+        "machine_id": "m-1",
+        "region_name": "西北B区",
+        "gpu_name": "RTX 3090",
+        "gpu_num": 1,
+    }
+
+    event, title, body, _fields = sent[1]
+    assert event == "snipe.running"
+    assert title == "Instance running"
+    assert body == "Instance snipe-instance-1 is running on machine m-1 in 西北B区"
+    assert all(item[3].get("instance_uuid") != "snipe-extra" for item in sent)
+
+
+def test_snipe_notifications_deduplicate_by_instance_uuid(home: Path, monkeypatch) -> None:
+    """Repeated ordered/running events for one instance notify once each."""
+    _seed_token()
+    _patch_notifier(monkeypatch)
+    machine = {"machine_id": "m-1", "gpu_name": "RTX 3090", "region_name": "西北B区"}
+
+    def fake_snipe(client, **kwargs):
+        on_event = kwargs["on_event"]
+        ordered = {"event": "ordered", "instance_uuid": "snipe-instance-1", "machine": machine}
+        running = {"event": "running", "instance_uuid": "snipe-instance-1"}
+        on_event(ordered)
+        on_event(ordered)
+        on_event(running)
+        on_event(running)
+        return dict(SNIPE_RESULT)
+
+    monkeypatch.setattr(tools_commands.snipe_handler, "snipe", fake_snipe)
+    recorder = _patch_notifier(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [item[0] for item in recorder.instances[0].sent] == ["snipe.ordered", "snipe.running"]
+
+
+def test_snipe_json_still_notifies_and_stays_pure(home: Path, monkeypatch) -> None:
+    """``--json`` suppresses rendering but not notifications or JSON purity."""
+    _seed_token()
+    _patch_snipe(monkeypatch, events=True)
+    recorder = _patch_notifier(monkeypatch)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == SNIPE_RESULT
+    assert [item[0] for item in recorder.instances[0].sent] == ["snipe.ordered", "snipe.running"]
+
+
+def test_snipe_notification_warnings_use_warning_in_human_mode(home: Path, monkeypatch) -> None:
+    """Delivery failures are warnings on stdout-like output in human mode."""
+    _seed_token()
+    _patch_snipe(monkeypatch, events=True)
+    recorder = _patch_notifier(monkeypatch)
+    recorder.warnings = ("Delivery failed.",)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Delivery failed." in result.output
+
+
+def test_snipe_notification_warnings_use_stderr_in_json_mode(home: Path, monkeypatch) -> None:
+    """``--json`` keeps warnings off stdout so the document stays parseable."""
+    _seed_token()
+    _patch_snipe(monkeypatch, events=True)
+    recorder = _patch_notifier(monkeypatch)
+    recorder.warnings = ("Delivery failed.",)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "--json",
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == SNIPE_RESULT
+    assert "Delivery failed." not in result.stdout
+    assert "Delivery failed." in result.stderr
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("timed out"), AutoDLError("api failed"), AuthError("token rejected")],
+    ids=["timeout", "api-error", "auth-error"],
+)
+def test_snipe_failure_notifies_before_exiting(home: Path, monkeypatch, error: Exception) -> None:
+    """Timeouts and AutoDL errors send ``snipe.failed`` and still exit cleanly."""
+    _seed_token()
+    recorder = _patch_notifier(monkeypatch)
+
+    def fake_snipe(client, **kwargs):
+        raise error
+
+    monkeypatch.setattr(tools_commands.snipe_handler, "snipe", fake_snipe)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert str(error) in result.output
+    assert "Traceback" not in result.output
+    sent = recorder.instances[0].sent
+    assert [item[0] for item in sent] == ["snipe.failed"]
+    assert sent[0][2] == str(error)
+    assert sent[0][3]["error_type"] == type(error).__name__
+
+
+def test_snipe_value_error_does_not_notify(home: Path, monkeypatch) -> None:
+    """A ValueError is a parameter error and never sends a notification."""
+    _seed_token()
+    recorder = _patch_notifier(monkeypatch)
+
+    def fake_snipe(client, **kwargs):
+        raise ValueError("Unknown region 'nowhere'")
+
+    monkeypatch.setattr(tools_commands.snipe_handler, "snipe", fake_snipe)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "tools",
+            "snipe",
+            "--gpu",
+            "RTX 3090",
+            "--image",
+            "base-image-x",
+            "--notify-webhook",
+            "https://example.test/hook",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Unknown region 'nowhere'" in result.output
+    assert recorder.instances[0].sent == []

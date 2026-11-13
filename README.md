@@ -155,6 +155,47 @@ starts at `--interval` and doubles with each consecutive failure on that machine
 autodl tools snipe --gpu "RTX 4090" --image base-image-ee43618uo7 --retry 3 --interval 5
 ```
 
+`--notify` sends a desktop notification and POSTs a JSON event to every
+`--notify-webhook URL` when an instance is ordered, when it starts running, and
+when the command fails. Desktop notifications use the optional
+`desktop-notifier` package on Linux, macOS, and Windows; install it with
+`pip install "autodl-cli[notify]"`. If the extra is missing, the command warns
+once and keeps going. Passing `--notify-webhook` alone enables notifications,
+while `--no-notify` disables both channels and overrides a config template. Each webhook body contains
+`source`, `event` (`snipe.ordered`, `snipe.running`, or `snipe.failed`),
+`title`, `body`, `text`, an ISO-8601 UTC `timestamp`, and a `data` object with
+the instance UUID, machine, region, GPU name and count, or error type when
+known. Delivery failures are reported as warnings and never stop the snipe.
+
+`--config PATH` loads defaults from a flat TOML template. Keys mirror the long
+option names (`gpu-num` and `gpu_num` are equivalent), repeatable options accept
+either a string or an array, and values are validated against the same types as
+the command line. Explicit command-line options always win. Unknown keys and
+invalid values are rejected instead of silently ignored.
+
+```toml
+region = ["nm-B2"]
+gpu = ["RTX 4090"]
+gpu_num = 2
+max_price = 1.8
+strategy = "price"
+parallel = 3
+count = 1
+image = "base-image-ee43618uo7"
+name = "trainer"
+data_disk = 50
+interval = 5
+timeout = 600
+retry = 3
+notify = true
+notify_webhook = ["https://api.day.app/<key>"]
+```
+
+```bash
+autodl tools snipe --config snipe.toml
+autodl --json tools snipe --config snipe.toml --notify-webhook https://example.test/hook
+```
+
 ### 🖼️ Base Images
 
 The create page's image picker is a four-level tree: framework, framework
@@ -472,8 +513,9 @@ AutoDL web API (reverse-engineered)
 ### Optional Dependencies
 
 ```bash
-pip install "autodl-cli[mcp]"  # click2mcp — the autodl-mcp server entry point
-pip install "autodl-cli[test]" # pytest, for working on the project itself
+pip install "autodl-cli[mcp]"    # click2mcp — the autodl-mcp server entry point
+pip install "autodl-cli[notify]" # desktop-notifier — `tools snipe --notify`
+pip install "autodl-cli[test]"   # pytest, for working on the project itself
 ```
 
 ### Shell Completions

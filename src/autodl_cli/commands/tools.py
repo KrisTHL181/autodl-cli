@@ -3,7 +3,8 @@
 ``request`` sends a raw HTTP request to any URL — the stored token and the
 mandatory ``AppVersion`` header are attached only when the target is an
 ``autodl.com`` host — or prints an equivalent curl command. ``snipe`` watches
-GPU stock and orders the first matching machine.
+GPU stock and orders the first matching machine, optionally sending desktop
+and webhook notifications and loading defaults from a TOML template.
 """
 
 from __future__ import annotations
@@ -11,15 +12,23 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 
 from autodl_cli import output
 from autodl_cli.commands._helpers import build_client, require_token
+from autodl_cli.commands._snipe_config import load_values as load_snipe_values
 from autodl_cli.config import load_config
 from autodl_cli.errors import AutoDLError
 from autodl_cli.handlers import snipe as snipe_handler
 from autodl_cli.handlers import tools as tools_handler
+from autodl_cli.utils.notify import Notifier
+
+#: Parameters that choose what ``snipe`` boots from. They are mutually
+#: exclusive, so an explicit CLI choice suppresses template values for the
+#: other members of the group.
+_IMAGE_CHOICE_OPTIONS: tuple[str, ...] = ("base_image_uuid", "private_image_uuid", "clone_instance_uuid")
 
 
 @click.group(help="General-purpose utility commands that are not tied to a single API domain.")
@@ -333,6 +342,89 @@ def _render_snipe_event(event: dict[str, object]) -> None:
         output.info(f"Instance {event.get('instance_uuid', '')} is running.")
 
 
+def _validate_webhook_urls(urls: tuple[str, ...]) -> None:
+    """Reject webhook values that are not absolute HTTP(S) URLs.
+
+    The invalid value is not echoed, because a webhook URL may contain a
+    secret key.
+
+    :param urls: Webhook URLs from the command line or a config template.
+    :raises click.UsageError: When a URL is not absolute HTTP(S).
+    """
+    for url in urls:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise click.UsageError("--notify-webhook must be an absolute http or https URL.")
+
+
+def _describe_snipe_notification(
+    event: dict[str, object],
+    seen: set[tuple[str, str]],
+    machines: dict[str, dict[str, object]],
+    gpu_num: int,
+) -> tuple[str, str, str, dict[str, object]] | None:
+    """Turn a snipe progress event into a notification description.
+
+    Only kept ``ordered`` events and ``running`` events produce a
+    notification. Surplus orders are ignored, and repeated events for the same
+    instance are dropped.
+
+    :param event: Event mapping emitted by the snipe handler.
+    :param seen: ``(event, instance_uuid)`` pairs already notified.
+    :param machines: Machine data remembered from ``ordered`` events, keyed by
+        instance UUID.
+    :param gpu_num: Requested GPU count, included in the webhook data.
+    :returns: ``(event_name, title, body, fields)``, or ``None`` when the
+        event does not notify.
+    """
+    kind = event.get("event")
+    if kind not in ("ordered", "running"):
+        return None
+    if kind == "ordered" and event.get("extra"):
+        return None
+
+    instance_uuid = str(event.get("instance_uuid") or "")
+    if not instance_uuid:
+        return None
+
+    machine = event.get("machine")
+    machine = machine if isinstance(machine, dict) else {}
+    if kind == "ordered":
+        machines[instance_uuid] = machine
+    else:
+        machine = machines.get(instance_uuid, machine)
+
+    key = (str(kind), instance_uuid)
+    if key in seen:
+        return None
+    seen.add(key)
+
+    machine_id = str(machine.get("machine_id") or "")
+    region_name = str(machine.get("region_name") or "")
+    gpu_name = str(machine.get("gpu_name") or "")
+
+    if kind == "ordered":
+        event_name = "snipe.ordered"
+        title = "GPU ordered"
+        body = f"Instance {instance_uuid} ordered on machine {machine_id} in {region_name} ({gpu_name})"
+    else:
+        event_name = "snipe.running"
+        title = "Instance running"
+        if machine_id and region_name:
+            body = f"Instance {instance_uuid} is running on machine {machine_id} in {region_name}"
+        else:
+            body = f"Instance {instance_uuid} is running"
+
+    fields: dict[str, object] = {
+        "instance_uuid": instance_uuid,
+        "machine_id": machine_id or None,
+        "region_name": region_name or None,
+        "gpu_name": gpu_name or None,
+        "gpu_num": gpu_num,
+    }
+    return event_name, title, body, fields
+
+
 @tools.command("snipe", help="Watch GPU stock and order a machine as soon as one is available.")
 @click.option(
     "--region",
@@ -441,6 +533,27 @@ def _render_snipe_event(event: dict[str, object]) -> None:
     show_default=True,
     help="Retry transient API errors during polling up to this many times; 0 disables retries.",
 )
+@click.option(
+    "--notify/--no-notify",
+    "notify",
+    default=None,
+    help="Send desktop and webhook notifications for orders, running instances, and failures.",
+)
+@click.option(
+    "--notify-webhook",
+    "notify_webhook",
+    multiple=True,
+    metavar="URL",
+    help="POST notification events as JSON to this URL (repeatable; implies --notify).",
+)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    default=None,
+    metavar="PATH",
+    help="Load option defaults from a TOML template; command-line options win.",
+)
 @click.pass_context
 def snipe_command(
     ctx: click.Context,
@@ -461,6 +574,9 @@ def snipe_command(
     interval: float,
     timeout: float,
     retry: int,
+    notify: bool | None,
+    notify_webhook: tuple[str, ...],
+    config_path: Path | None,
 ) -> None:
     """Watch GPU stock and order a machine as soon as one is available.
 
@@ -481,6 +597,15 @@ def snipe_command(
     disables retries. A machine whose order is rejected is skipped for an
     exponentially growing cooldown, so the next matching machine is tried
     instead.
+
+    ``--notify`` sends a desktop notification and a JSON POST to every
+    ``--notify-webhook`` URL when an instance is ordered, when it starts
+    running, and when the command fails. Passing ``--notify-webhook`` alone
+    enables notifications, while ``--no-notify`` disables them even when the
+    config template enables them. ``--config`` reads defaults from a flat TOML
+    table whose keys mirror the long option names; explicitly supplied
+    command-line options always win. Notification delivery failures are
+    reported as warnings but never abort the snipe.
 
     :param ctx: Click context; ``ctx.obj["json"]`` selects JSON output.
     :param regions: Region identifiers to search; empty means every region.
@@ -503,12 +628,71 @@ def snipe_command(
     :param timeout: Maximum seconds to wait; ``0`` waits until interrupted.
     :param retry: Consecutive transient polling errors to retry; ``0``
         disables retries.
+    :param notify: Tri-state notification switch; ``None`` enables them only
+        when a webhook is configured.
+    :param notify_webhook: Webhook URLs that receive JSON event payloads.
+    :param config_path: Optional TOML template with option defaults.
     :raises click.UsageError: When no targeting filter is supplied, the image
         flags conflict with ``--clone``, the wrong number of image UUIDs is
-        supplied, or clone-only flags are used without ``--clone``.
+        supplied, clone-only flags are used without ``--clone``, or a webhook
+        URL is not absolute HTTP(S).
+    :raises click.BadParameter: When the config template is invalid.
     :raises click.ClickException: When no token is configured, the request
         fails, or the snipe times out.
     """
+    options: dict[str, object] = {
+        "regions": regions,
+        "gpu_types": gpu_types,
+        "gpu_num": gpu_num,
+        "max_price": max_price,
+        "strategy": strategy,
+        "parallel": parallel,
+        "count": count,
+        "base_image_uuid": base_image_uuid,
+        "private_image_uuid": private_image_uuid,
+        "clone_instance_uuid": clone_instance_uuid,
+        "copy_data_disk": copy_data_disk,
+        "keep_service_address": keep_service_address,
+        "name": name,
+        "data_disk": data_disk,
+        "interval": interval,
+        "timeout": timeout,
+        "retry": retry,
+        "notify": notify,
+        "notify_webhook": notify_webhook,
+    }
+    if config_path is not None:
+        explicit_image_choice = any(
+            ctx.get_parameter_source(destination) is not click.core.ParameterSource.DEFAULT
+            for destination in _IMAGE_CHOICE_OPTIONS
+        )
+        for destination, value in load_snipe_values(config_path, ctx.command.params).items():
+            if ctx.get_parameter_source(destination) is not click.core.ParameterSource.DEFAULT:
+                continue
+            if explicit_image_choice and destination in _IMAGE_CHOICE_OPTIONS:
+                continue
+            options[destination] = value
+
+    regions = options["regions"]
+    gpu_types = options["gpu_types"]
+    gpu_num = options["gpu_num"]
+    max_price = options["max_price"]
+    strategy = options["strategy"]
+    parallel = options["parallel"]
+    count = options["count"]
+    base_image_uuid = options["base_image_uuid"]
+    private_image_uuid = options["private_image_uuid"]
+    clone_instance_uuid = options["clone_instance_uuid"]
+    copy_data_disk = options["copy_data_disk"]
+    keep_service_address = options["keep_service_address"]
+    name = options["name"]
+    data_disk = options["data_disk"]
+    interval = options["interval"]
+    timeout = options["timeout"]
+    retry = options["retry"]
+    notify = options["notify"]
+    notify_webhook = options["notify_webhook"]
+
     clone_mode = bool(clone_instance_uuid.strip())
     if not regions and not gpu_types:
         raise click.UsageError("Pass at least one of --region or --gpu.")
@@ -519,9 +703,39 @@ def snipe_command(
     if not clone_mode and (not copy_data_disk or keep_service_address):
         raise click.UsageError("--no-copy-data-disk and --keep-service-address require --clone.")
 
+    _validate_webhook_urls(notify_webhook)
+    notify_source = ctx.get_parameter_source("notify")
+    webhook_source = ctx.get_parameter_source("notify_webhook")
+    if notify_source is not click.core.ParameterSource.DEFAULT:
+        enabled = bool(notify)
+    elif webhook_source is not click.core.ParameterSource.DEFAULT and notify_webhook:
+        enabled = True
+    else:
+        enabled = notify if notify is not None else bool(notify_webhook)
+    notifier = Notifier(desktop=enabled, webhooks=notify_webhook if enabled else ())
+
     config = load_config()
     token = require_token(config)
     as_json = bool(ctx.obj and ctx.obj.get("json"))
+
+    notified: set[tuple[str, str]] = set()
+    ordered_machines: dict[str, dict[str, object]] = {}
+
+    def on_event(progress_event: dict[str, object]) -> None:
+        """Notify for selected events and render progress in human mode.
+
+        :param progress_event: Event mapping emitted by the snipe handler.
+        """
+        description = _describe_snipe_notification(progress_event, notified, ordered_machines, gpu_num)
+        if description is not None:
+            event_name, title, body, fields = description
+            for warning in notifier.send(event_name, title, body, **fields):
+                if as_json:
+                    output.error(warning)
+                else:
+                    output.warning(warning)
+        if not as_json:
+            _render_snipe_event(progress_event)
 
     try:
         with build_client(token, config) as client:
@@ -544,9 +758,16 @@ def snipe_command(
                 interval=interval,
                 timeout=timeout,
                 retry=retry,
-                on_event=None if as_json else _render_snipe_event,
+                on_event=on_event,
             )
-    except (ValueError, TimeoutError, AutoDLError) as exc:
+    except (TimeoutError, AutoDLError) as exc:
+        for warning in notifier.send("snipe.failed", "Snipe failed", str(exc), error_type=type(exc).__name__):
+            if as_json:
+                output.error(warning)
+            else:
+                output.warning(warning)
+        raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:

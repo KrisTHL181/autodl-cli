@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 #: source of colour.
 console = Console(highlight=False)
 
+#: Shared stderr console for error messages; kept separate so ``--json`` output
+#: on stdout stays parseable.
+error_console = Console(stderr=True, highlight=False)
+
 # Colour palette, mirroring the zhihu-cli conventions: cyan for titles and
 # structure, green for success, yellow for warnings, magenta for numbers,
 # red for errors, dim for secondary metadata, and bold for key labels.
@@ -2241,4 +2245,4 @@ def error(message: str) -> None:
 
     :param message: Text to display.
     """
-    console.print(message, style=_STYLE_ERR, stderr=True, markup=False)
+    error_console.print(message, style=_STYLE_ERR, markup=False)
